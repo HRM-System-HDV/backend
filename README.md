@@ -54,26 +54,25 @@ Postgres     Postgres     Postgres     Postgres     Postgres
 ```text
 backend/
 ├── docker-compose.yml          # Hạ tầng 5 container PostgreSQL độc lập
-├── docs/                       # Tài liệu thiết kế kiến trúc SOA & quy trình nghiệp vụ
-└── backend/                    # Mã nguồn các Microservices
-    ├── api-gateway/            # API Gateway trung tâm (:4000)
-    │   ├── src/                # Middleware proxy, rate limiter, JWT verify
-    │   └── server.js
-    ├── identity-service/       # Identity Service (:4001)
-    │   ├── prisma/             # Schema & Seed tài khoản
-    │   └── src/                # Controller, Service, Validator, Routes
-    ├── organization-service/   # Organization Service (:4002)
-    │   ├── prisma/             # Schema chi nhánh, phòng ban, hồ sơ nhân sự
-    │   └── src/
-    ├── work-service/           # Work Service (:4003)
-    │   ├── prisma/             # Schema ca kíp, chấm công, vi phạm
-    │   └── src/
-    ├── payroll-service/        # Payroll Service (:4004)
-    │   ├── prisma/             # Schema bảng lương, tính lương, chi trả
-    │   └── src/
-    └── integration-service/    # Integration Service (:4005)
-        ├── prisma/             # Schema đơn từ, thông báo, quy chế, Wi-Fi
-        └── src/                # SOAP Bank Simulator, REST APIs
+├── package.json                # Root package & scripts
+├── api-gateway/                # API Gateway trung tâm (:4000)
+│   ├── src/                    # Middleware proxy, rate limiter, JWT verify
+│   └── server.js
+├── identity-service/           # Identity Service (:4001)
+│   ├── prisma/                 # Schema & Seed tài khoản
+│   └── src/                    # Controller, Service, Validator, Routes
+├── organization-service/       # Organization Service (:4002)
+│   ├── prisma/                 # Schema chi nhánh, phòng ban, hồ sơ nhân sự
+│   └── src/
+├── work-service/               # Work Service (:4003)
+│   ├── prisma/                 # Schema ca kíp, chấm công, vi phạm
+│   └── src/
+├── payroll-service/            # Payroll Service (:4004)
+│   ├── prisma/                 # Schema bảng lương, tính lương, chi trả
+│   └── src/
+└── integration-service/        # Integration Service (:4005)
+    ├── prisma/                 # Schema đơn từ, thông báo, quy chế, Wi-Fi
+    └── src/                    # SOAP Bank Simulator, REST APIs
 ```
 
 ---
@@ -93,51 +92,45 @@ docker compose ps
 
 ### Bước 1: Khởi động API Gateway (Port 4000)
 ```bash
-cd backend/api-gateway
-cp .env.example .env
+cd api-gateway
 npm install
 npm run dev
 ```
 
 ### Bước 2: Khởi động các Microservices (Mở các terminal riêng)
-Mỗi service đều có file `.env.example` chứa chuỗi kết nối chuẩn tới DB tương ứng. Hãy copy `.env.example` thành `.env`, sau đó tiến hành push schema và nạp dữ liệu mẫu:
+Mỗi service đều có file `.env.example` và file `.env` đã được chuẩn bị sẵn. Hãy tiến hành push schema và nạp dữ liệu mẫu:
 
 ```bash
 # 1. Identity Service (Port 4001)
-cd backend/identity-service
-cp .env.example .env
+cd identity-service
 npm install
 npx prisma db push
 node prisma/seed.js
 npm run dev
 
 # 2. Organization Service (Port 4002)
-cd backend/organization-service
-cp .env.example .env
+cd organization-service
 npm install
 npx prisma db push
 node prisma/seed.js
 npm run dev
 
 # 3. Work Service (Port 4003)
-cd backend/work-service
-cp .env.example .env
+cd work-service
 npm install
 npx prisma db push
 node prisma/seed.js
 npm run dev
 
 # 4. Payroll Service (Port 4004)
-cd backend/payroll-service
-cp .env.example .env
+cd payroll-service
 npm install
 npx prisma db push
 node prisma/seed.js
 npm run dev
 
 # 5. Integration Service (Port 4005)
-cd backend/integration-service
-cp .env.example .env
+cd integration-service
 npm install
 npx prisma db push
 npm run dev
