@@ -38,6 +38,7 @@ describe("Domain Validation Tests", () => {
   test("validateCreateRegulation kiểm tra code và content", () => {
     assert.ok(validateCreateRegulation({}).length > 0);
     assert.equal(validateCreateRegulation({ code: "NQ-01", title: "Nội quy", category: "Kỷ luật", content: "Nội dung" }).length, 0);
+    assert.equal(validateCreateRegulation({ title: "Nội quy", category: "Kỷ luật", content: "Nội dung" }).length, 0);
   });
 
   test("validateCreateWifiConfig kiểm tra ssid, bssid và branch", () => {

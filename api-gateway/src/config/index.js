@@ -11,7 +11,7 @@ module.exports = {
   jwtSecret: process.env.JWT_SECRET || "dev_only_secret_thay_khi_deploy",
   cookieName: process.env.COOKIE_NAME || "hrm-session",
   rateLimitWindowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || "60000", 10),
-  rateLimitMax: parseInt(process.env.RATE_LIMIT_MAX || "300", 10),
+  rateLimitMax: parseInt(process.env.RATE_LIMIT_MAX || "10000", 10),
   // Tuyến công khai không yêu cầu token.
   publicPaths: [
     { method: "POST", path: "/api/auth/login", exact: true },

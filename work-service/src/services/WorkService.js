@@ -15,16 +15,102 @@ let memoryRegistrations = [];
 let memoryConfig = { id: "default", latePenaltyAmount: 20000, earlyLeavePenaltyAmount: 0, gracePeriodMinutes: 5, autoCloseShift: false, shiftSwapMode: "manual", latePenaltyPct: 10, earlyLeavePenaltyPct: 10, earlyCheckinMinutes: 15, maxPenaltiesPerMonth: 10, deductOnCheckout: true, allowDoubleCheckin: true, maxCheckinsPerDay: 3, maxSwapsPerMonth: 3, requireReasonSwap: true };
 let memoryTemplates = [];
 
+function sanitizeShiftPayload(payload = {}) {
+  const allowed = [
+    "employeeId",
+    "branchSlug",
+    "date",
+    "template",
+    "scheduledStart",
+    "scheduledEnd",
+    "checkIn",
+    "checkOut",
+    "status",
+    "note",
+    "isRecurring",
+  ];
+  const cleaned = {};
+  for (const k of allowed) {
+    if (payload[k] !== undefined) {
+      cleaned[k] = payload[k];
+    }
+  }
+  return cleaned;
+}
+
+function sanitizeTaskPayload(payload = {}) {
+  const allowed = [
+    "title",
+    "description",
+    "assignedTo",
+    "branchSlug",
+    "dueDate",
+    "status",
+    "sourceType",
+    "assignedByName",
+    "shiftName",
+    "priority",
+    "assignedToEmail",
+    "assignedToName",
+    "completedAt",
+    "requirePhoto",
+    "proofPhotoUrl",
+    "photoSubmittedBy",
+    "photoSubmittedAt",
+  ];
+  const cleaned = {};
+  for (const k of allowed) {
+    if (payload[k] !== undefined) {
+      cleaned[k] = payload[k];
+    }
+  }
+  return cleaned;
+}
+
 async function ensureSeeded() {
   const prisma = database.getPrisma();
   if (prisma) {
     try {
-      await prisma.shift.deleteMany({}).catch(() => {});
-      await prisma.shiftRegistration.deleteMany({}).catch(() => {});
-      await prisma.task.deleteMany({}).catch(() => {});
-      await prisma.attendance.deleteMany({}).catch(() => {});
-      await prisma.shiftTemplate.deleteMany({}).catch(() => {});
-    } catch (_) {}
+      const count = await prisma.shiftTemplate.count();
+      if (count === 0) {
+        await prisma.shiftTemplate.createMany({
+          data: [
+            { name: "Ca Sáng", startTime: "07:00", endTime: "14:00" },
+            { name: "Ca Chiều", startTime: "14:00", endTime: "22:00" },
+            { name: "Ca Tối", startTime: "18:00", endTime: "23:00" },
+          ],
+        });
+        console.log("[work-service] Đã khởi tạo 3 khung ca mẫu mặc định vào DB");
+      }
+
+      const regCount = await prisma.shiftRegistration.count();
+      if (regCount === 0) {
+        await prisma.shiftRegistration.createMany({
+          data: [
+            { employeeId: "NV-0003", branchSlug: "HN-1", shiftId: "t1", wish: "02/11" },
+            { employeeId: "NV-0003", branchSlug: "HN-1", shiftId: "t1", wish: "03/11" },
+            { employeeId: "NV-0003", branchSlug: "HN-1", shiftId: "t2", wish: "04/11" },
+            { employeeId: "NV-0003", branchSlug: "HN-1", shiftId: "t1", wish: "06/11" },
+            { employeeId: "NV-0003", branchSlug: "HN-1", shiftId: "t2", wish: "07/11" },
+            { employeeId: "NV-0002", branchSlug: "HN-1", shiftId: "t2", wish: "03/11" },
+            { employeeId: "NV-0002", branchSlug: "HN-1", shiftId: "t2", wish: "04/11" },
+            { employeeId: "NV-0002", branchSlug: "HN-1", shiftId: "t1", wish: "05/11" },
+            { employeeId: "NV-0002", branchSlug: "HN-1", shiftId: "t3", wish: "06/11" },
+          ],
+        });
+        console.log("[work-service] Đã khởi tạo dữ liệu đăng ký ca mẫu vào DB");
+      }
+    } catch (e) {
+      console.warn("[work-service] Seed shift data lỗi:", e.message);
+    }
+  } else {
+    if (memoryTemplates.length === 0) {
+      memoryTemplates = [
+        { id: "st-1", name: "Ca Sáng", startTime: "07:00", endTime: "14:00" },
+        { id: "st-2", name: "Ca Chiều", startTime: "14:00", endTime: "22:00" },
+        { id: "st-3", name: "Ca Tối", startTime: "18:00", endTime: "23:00" },
+      ];
+    }
   }
   return { mode: prisma ? "postgres" : "memory" };
 }
@@ -39,7 +125,9 @@ async function listShifts(query = {}) {
       if (query.employeeId) where.employeeId = query.employeeId;
       if (query.date) where.date = query.date;
       return await prisma.shift.findMany({ where, orderBy: { date: "desc" } });
-    } catch (_) {}
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.shift.findMany:", err);
+    }
   }
   return memoryShifts.filter((s) => {
     if (query.branchSlug && s.branchSlug !== query.branchSlug) return false;
@@ -50,27 +138,33 @@ async function listShifts(query = {}) {
 }
 
 async function createShift(payload) {
+  const data = sanitizeShiftPayload(payload);
   const prisma = database.getPrisma();
   if (prisma) {
     try {
-      return await prisma.shift.create({ data: payload });
-    } catch (_) {}
+      return await prisma.shift.create({ data });
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.shift.create:", err);
+    }
   }
-  const row = { id: uid("sh"), status: "đang làm", ...payload };
+  const row = { id: uid("sh"), status: "đang làm", ...data };
   memoryShifts.push(row);
   return row;
 }
 
 async function updateShift(id, payload) {
+  const data = sanitizeShiftPayload(payload);
   const prisma = database.getPrisma();
   if (prisma) {
     try {
-      return await prisma.shift.update({ where: { id }, data: payload });
-    } catch (_) {}
+      return await prisma.shift.update({ where: { id }, data });
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.shift.update:", err);
+    }
   }
   const idx = memoryShifts.findIndex((s) => s.id === id);
   if (idx < 0) return null;
-  memoryShifts[idx] = { ...memoryShifts[idx], ...payload };
+  memoryShifts[idx] = { ...memoryShifts[idx], ...data };
   return memoryShifts[idx];
 }
 
@@ -89,13 +183,23 @@ async function deleteShift(id) {
 }
 
 async function registerShift(payload) {
+  const wish = payload.wish || payload.preference;
+  const data = {
+    employeeId: payload.employeeId,
+    branchSlug: payload.branchSlug || null,
+    week: payload.week || null,
+    shiftId: payload.shiftId || null,
+    wish: wish || null,
+  };
   const prisma = database.getPrisma();
   if (prisma) {
     try {
-      return await prisma.shiftRegistration.create({ data: payload });
-    } catch (_) {}
+      return await prisma.shiftRegistration.create({ data });
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.shiftRegistration.create:", err);
+    }
   }
-  const row = { id: uid("reg"), ...payload };
+  const row = { id: uid("reg"), ...data, preference: wish };
   memoryRegistrations.push(row);
   return row;
 }
@@ -107,14 +211,33 @@ async function listRegistrations(query = {}) {
       const where = {};
       if (query.branchSlug) where.branchSlug = query.branchSlug;
       if (query.week) where.week = query.week;
-      return await prisma.shiftRegistration.findMany({ where });
-    } catch (_) {}
+      if (query.employeeId) where.employeeId = query.employeeId;
+      const rows = await prisma.shiftRegistration.findMany({ where, orderBy: { createdAt: "desc" } });
+      return rows.map((r) => ({ ...r, preference: r.wish }));
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.shiftRegistration.findMany:", err);
+    }
   }
   return memoryRegistrations.filter((r) => {
     if (query.branchSlug && r.branchSlug !== query.branchSlug) return false;
     if (query.week && r.week !== query.week) return false;
+    if (query.employeeId && r.employeeId !== query.employeeId) return false;
     return true;
   });
+}
+
+async function deleteRegistration(id) {
+  const prisma = database.getPrisma();
+  if (prisma) {
+    try {
+      await prisma.shiftRegistration.delete({ where: { id } });
+      return true;
+    } catch (_) {}
+  }
+  const idx = memoryRegistrations.findIndex((r) => r.id === id);
+  if (idx < 0) return false;
+  memoryRegistrations.splice(idx, 1);
+  return true;
 }
 
 // --- Attendance ---
@@ -269,14 +392,18 @@ async function listTasks(query = {}) {
   if (prisma) {
     try {
       const where = {};
-      if (query.branchSlug) where.branchSlug = query.branchSlug;
+      if (query.branchSlug) {
+        where.branchSlug = { equals: query.branchSlug, mode: "insensitive" };
+      }
       if (query.assignedTo) where.assignedTo = query.assignedTo;
       if (query.status) where.status = query.status;
       return await prisma.task.findMany({ where, orderBy: { createdAt: "desc" } });
-    } catch (_) {}
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.task.findMany:", err);
+    }
   }
   return memoryTasks.filter((t) => {
-    if (query.branchSlug && t.branchSlug !== query.branchSlug) return false;
+    if (query.branchSlug && (t.branchSlug || "").toLowerCase() !== query.branchSlug.toLowerCase()) return false;
     if (query.assignedTo && t.assignedTo !== query.assignedTo) return false;
     if (query.status && t.status !== query.status) return false;
     return true;
@@ -284,27 +411,33 @@ async function listTasks(query = {}) {
 }
 
 async function createTask(payload) {
+  const data = sanitizeTaskPayload(payload);
   const prisma = database.getPrisma();
   if (prisma) {
     try {
-      return await prisma.task.create({ data: payload });
-    } catch (_) {}
+      return await prisma.task.create({ data });
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.task.create:", err);
+    }
   }
-  const row = { id: uid("t"), status: "pending", ...payload };
+  const row = { id: uid("t"), status: "pending", ...data };
   memoryTasks.push(row);
   return row;
 }
 
 async function updateTask(id, payload) {
+  const data = sanitizeTaskPayload(payload);
   const prisma = database.getPrisma();
   if (prisma) {
     try {
-      return await prisma.task.update({ where: { id }, data: payload });
-    } catch (_) {}
+      return await prisma.task.update({ where: { id }, data });
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.task.update:", err);
+    }
   }
   const idx = memoryTasks.findIndex((t) => t.id === id);
   if (idx < 0) return null;
-  memoryTasks[idx] = { ...memoryTasks[idx], ...payload };
+  memoryTasks[idx] = { ...memoryTasks[idx], ...data };
   return memoryTasks[idx];
 }
 
@@ -401,6 +534,7 @@ module.exports = {
   deleteShift,
   registerShift,
   listRegistrations,
+  deleteRegistration,
   getShiftById,
   getConfig,
   updateConfig,

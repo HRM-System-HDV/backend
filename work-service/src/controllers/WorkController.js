@@ -74,6 +74,18 @@ async function listRegistrations(req, res, next) {
   }
 }
 
+async function deleteRegistration(req, res, next) {
+  try {
+    const success = await WorkService.deleteRegistration(req.params.id);
+    if (!success) {
+      return res.status(404).json({ error: { code: "NOT_FOUND", message: "Bản ghi đăng ký không tồn tại" } });
+    }
+    return res.status(200).json({ message: "Xóa đăng ký thành công" });
+  } catch (e) {
+    return next(e);
+  }
+}
+
 async function checkin(req, res, next) {
   try {
     const errors = validateAttendance(req.body);
@@ -243,6 +255,7 @@ module.exports = {
   assignShift,
   registerShift,
   listRegistrations,
+  deleteRegistration,
   getShift,
   checkin,
   checkout,

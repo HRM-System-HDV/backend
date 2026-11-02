@@ -7,8 +7,9 @@ function validateCreateRegulation(payload) {
   if (!payload || typeof payload !== "object") {
     return ["Payload nội quy không hợp lệ"];
   }
-  if (!payload.code || !payload.code.trim()) {
-    errors.push("Mã nội quy (code) là bắt buộc");
+  // Mã nội quy (code) tự động sinh NQ-XXXX nếu để trống
+  if (payload.code !== undefined && payload.code !== null && typeof payload.code !== "string") {
+    errors.push("Mã nội quy (code) phải là chuỗi ký tự");
   }
   if (!payload.title || !payload.title.trim()) {
     errors.push("Tiêu đề nội quy là bắt buộc");

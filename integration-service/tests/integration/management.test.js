@@ -39,7 +39,6 @@ describe("Management Modules Integration Tests (News, Regulations, WifiConfigs)"
         title: "Tin tuyển dụng tháng 9",
         summary: "Tuyển dụng nhân viên vận hành chi nhánh",
         content: "Chi tiết các vị trí ứng tuyển...",
-        author: "Phòng Nhân Sự",
         tag: "Tuyển dụng",
         tagTone: "success",
         pinned: true,
@@ -125,6 +124,31 @@ describe("Management Modules Integration Tests (News, Regulations, WifiConfigs)"
       assert.ok(body.data.id);
       assert.equal(body.data.code, newReg.code);
       createdRegId = body.data.id;
+    });
+
+    test("POST /api/regulations tự động sinh mã NQ-XXXX khi không truyền code", async () => {
+      const regWithoutCode = {
+        title: "Quy tắc văn hóa công ty",
+        category: "Vận hành chung",
+        summary: "Văn hóa ứng xử nơi công sở",
+        content: "Chi tiết các điều khoản ứng xử...",
+        status: "hiệu lực",
+        scope: "Toàn công ty",
+      };
+
+      const res = await fetch(`${baseUrl}/api/regulations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(regWithoutCode),
+      });
+
+      const body = await res.json();
+      assert.equal(res.status, 201);
+      assert.ok(body.data.id);
+      assert.match(body.data.code, /^NQ-\d{4}$/);
+
+      // Dọn dẹp
+      await fetch(`${baseUrl}/api/regulations/${body.data.id}`, { method: "DELETE" });
     });
 
     test("GET /api/regulations/:id trả về chi tiết nội quy", async () => {

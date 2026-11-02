@@ -41,7 +41,6 @@ async function createNews(req, res, next) {
       title: req.body.title.trim(),
       summary: req.body.summary.trim(),
       content: req.body.content.trim(),
-      author: req.body.author ? req.body.author.trim() : "Ban Quản trị",
       date: req.body.date || new Date().toLocaleDateString("vi-VN").replace(/\//g, "-"),
       tag: req.body.tag ? req.body.tag.trim() : "Thông báo chung",
       tagTone: req.body.tagTone || "primary",
@@ -67,7 +66,9 @@ async function updateNews(req, res, next) {
       });
     }
 
-    const updated = await NewsService.update(id, req.body);
+    const payload = { ...req.body };
+    delete payload.author;
+    const updated = await NewsService.update(id, payload);
     return res.status(200).json({
       data: updated,
       message: "Cập nhật tin tức thành công",
