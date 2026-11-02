@@ -12,6 +12,7 @@ router.put("/shifts/templates/:id", WorkController.updateTemplate);
 router.delete("/shifts/templates/:id", WorkController.deleteTemplate);
 router.get("/shifts/registrations", WorkController.listRegistrations);
 router.post("/shifts/register", WorkController.registerShift);
+router.delete("/shifts/registrations/:id", WorkController.deleteRegistration);
 router.get("/shifts", WorkController.listShifts);
 router.post("/shifts", WorkController.createShift);
 router.put("/shifts/:id", WorkController.updateShift);

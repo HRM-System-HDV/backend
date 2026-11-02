@@ -27,8 +27,37 @@ async function findById(id) {
   return prisma.regulation.findUnique({ where: { id } });
 }
 
+// Sinh mã nội quy tự động: NQ-0001 (4 chữ số, tăng dần theo mã lớn nhất hiện có)
+async function nextRegulationCode() {
+  let max = 0;
+  const prefix = "NQ-";
+  const scan = (raw) => {
+    const s = String(raw || "").trim().toUpperCase();
+    if (!s.startsWith(prefix)) return;
+    const n = Number(s.slice(prefix.length));
+    if (Number.isInteger(n) && n > max) max = n;
+  };
+
+  const prisma = database.getPrisma();
+  if (prisma) {
+    const rows = await prisma.regulation
+      .findMany({
+        where: { code: { startsWith: prefix } },
+        select: { code: true },
+      })
+      .catch(() => []);
+    rows.forEach((r) => scan(r.code));
+  } else {
+    memoryRegulations.forEach((r) => scan(r.code));
+  }
+  return `${prefix}${String(max + 1).padStart(4, "0")}`;
+}
+
 async function create(data) {
   const prisma = database.getPrisma();
+  if (!data.code || !String(data.code).trim()) {
+    data.code = await nextRegulationCode();
+  }
   if (!prisma) {
     const newItem = {
       id: data.id || `reg-${Date.now()}`,
@@ -76,4 +105,5 @@ module.exports = {
   create,
   update,
   deleteById,
+  nextRegulationCode,
 };

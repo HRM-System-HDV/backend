@@ -37,8 +37,12 @@ async function createRegulation(req, res, next) {
       });
     }
 
+    const code = req.body.code && typeof req.body.code === "string" && req.body.code.trim()
+      ? req.body.code.trim()
+      : await RegulationService.nextRegulationCode();
+
     const created = await RegulationService.create({
-      code: req.body.code.trim(),
+      code,
       title: req.body.title.trim(),
       category: req.body.category.trim(),
       summary: req.body.summary ? req.body.summary.trim() : "",
@@ -47,7 +51,6 @@ async function createRegulation(req, res, next) {
       scope: req.body.scope || "Toàn công ty",
       effectiveDate: req.body.effectiveDate || new Date().toLocaleDateString("vi-VN").replace(/\//g, "-"),
       expiryDate: req.body.expiryDate || null,
-      author: req.body.author ? req.body.author.trim() : "Ban Giám Đốc",
       version: req.body.version || "1.0",
       pinned: Boolean(req.body.pinned),
       attachments: typeof req.body.attachments === "number" ? req.body.attachments : 0,
@@ -72,7 +75,9 @@ async function updateRegulation(req, res, next) {
       });
     }
 
-    const updated = await RegulationService.update(id, req.body);
+    const payload = { ...req.body };
+    delete payload.author;
+    const updated = await RegulationService.update(id, payload);
     return res.status(200).json({
       data: updated,
       message: "Cập nhật nội quy thành công",

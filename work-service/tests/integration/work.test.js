@@ -25,6 +25,7 @@ test("shifts + attendance + tasks flow", async () => {
   });
   body = await res.json();
   assert.equal(res.status, 201);
+  const createdShiftId = body.data?.id;
 
   // Thiếu date -> 400
   res = await fetch(`${base}/api/shifts`, {
@@ -77,6 +78,15 @@ test("shifts + attendance + tasks flow", async () => {
     body: JSON.stringify({ status: "done" }),
   });
   assert.equal(res.status, 200);
+
+  res = await fetch(`${base}/api/tasks/${created.data.id}`, {
+    method: "DELETE",
+  });
+  assert.equal(res.status, 200);
+
+  if (createdShiftId) {
+    await fetch(`${base}/api/shifts/${createdShiftId}`, { method: "DELETE" });
+  }
 
   server.close();
 });

@@ -20,6 +20,8 @@ model Shift {
   checkIn        String?
   checkOut       String?
   status         String   @default("đang làm")
+  note           String?
+  isRecurring    Boolean  @default(false)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -85,15 +87,26 @@ model ShiftRegistration {
 }
 
 model Task {
-  id          String   @id @default(cuid())
-  title       String
-  description String?
-  assignedTo  String?
-  branchSlug  String?
-  dueDate     String?
-  status      String   @default("pending")
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id               String   @id @default(cuid())
+  title            String
+  description      String?
+  assignedTo       String?
+  branchSlug       String?
+  dueDate          String?
+  status           String   @default("pending")
+  sourceType       String?  @default("manager")
+  assignedByName   String?
+  shiftName        String?
+  priority         String?  @default("normal")
+  assignedToEmail  String?
+  assignedToName   String?
+  completedAt      String?
+  requirePhoto     Boolean? @default(false)
+  proofPhotoUrl    String?
+  photoSubmittedBy String?
+  photoSubmittedAt String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   @@map("tasks")
 }
