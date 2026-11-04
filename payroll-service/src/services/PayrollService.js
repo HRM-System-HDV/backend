@@ -16,6 +16,31 @@ function bankRef() {
   return `BANK-${Math.floor(10000000 + Math.random() * 90000000)}`;
 }
 
+// Sinh mã phiếu lương chuẩn: PL-0001, PL-0002...
+async function nextPayslipId() {
+  const prefix = "PL-";
+  let max = 0;
+  const scan = (raw) => {
+    const s = String(raw || "").trim().toUpperCase();
+    if (!s.startsWith(prefix)) return;
+    const n = Number(s.slice(prefix.length));
+    if (Number.isInteger(n) && n > max) max = n;
+  };
+  const prisma = database.getPrisma();
+  if (prisma) {
+    try {
+      const rows = await prisma.payslip.findMany({
+        where: { id: { startsWith: prefix } },
+        select: { id: true },
+      });
+      rows.forEach((r) => scan(r.id));
+    } catch (_) {}
+  } else {
+    memoryPayslips.forEach((p) => scan(p.id));
+  }
+  return `${prefix}${String(max + 1).padStart(4, "0")}`;
+}
+
 const seedAccounts = [];
 let memoryAccounts = [];
 let memoryPayouts = [];
@@ -24,13 +49,10 @@ let memoryPayslips = [];
 async function ensureSeeded() {
   const prisma = database.getPrisma();
   if (prisma) {
-    try {
-      await prisma.payslip.deleteMany({}).catch(() => {});
-      await prisma.payout.deleteMany({}).catch(() => {});
-      await prisma.bankAccount.deleteMany({}).catch(() => {});
-    } catch (_) {}
+    // Không tự động xoá dữ liệu bảng lương, lệnh chi và tài khoản ngân hàng khi khởi động.
+    return { mode: "postgres" };
   }
-  return { mode: prisma ? "postgres" : "memory" };
+  return { mode: "memory" };
 }
 
 // --- Bank accounts ---
@@ -276,8 +298,9 @@ async function generatePayslip({ employeeId, month, baseSalary, bonus = 0, total
   }
   const netSalary = baseSalary + bonus - totalPenalty;
   const prisma = database.getPrisma();
+  const payslipId = await nextPayslipId();
   const payload = {
-    id: uid("ps"),
+    id: payslipId,
     employeeId,
     month,
     baseSalary,

@@ -2,7 +2,7 @@
 
 const OrgService = require("../services/OrgService");
 const { validateBranch, validateDepartment, validateEmployee } = require("../validators/orgValidator");
-const { ValidationError, NotFoundError } = require("../utils/errors");
+const { ValidationError, NotFoundError, ForbiddenError } = require("../utils/errors");
 
 async function listBranches(_req, res, next) {
   try {
@@ -149,7 +149,30 @@ async function updateEmployee(req, res, next) {
 
 async function deleteEmployee(req, res, next) {
   try {
-    const ok = await OrgService.removeEmployee(req.params.id);
+    const targetId = req.params.id;
+    const currentUserId = req.headers["x-user-id"];
+    const currentUserEmail = req.headers["x-user-email"];
+
+    if (currentUserId && (targetId === currentUserId || targetId.toLowerCase() === String(currentUserId).toLowerCase())) {
+      const err = new ForbiddenError("Không được phép tự xóa tài khoản của chính mình đang đăng nhập");
+      err.code = "CANNOT_DELETE_SELF";
+      throw err;
+    }
+
+    const emp = await OrgService.getEmployee(targetId);
+    if (!emp) {
+      const err = new NotFoundError("Không tìm thấy thông tin nhân sự trên hệ thống");
+      err.code = "EMPLOYEE_NOT_FOUND";
+      throw err;
+    }
+
+    if (currentUserEmail && emp.email && emp.email.toLowerCase() === String(currentUserEmail).toLowerCase()) {
+      const err = new ForbiddenError("Không được phép tự xóa tài khoản của chính mình đang đăng nhập");
+      err.code = "CANNOT_DELETE_SELF";
+      throw err;
+    }
+
+    const ok = await OrgService.removeEmployee(targetId);
     if (!ok) {
       const err = new NotFoundError("Không tìm thấy thông tin nhân sự trên hệ thống");
       err.code = "EMPLOYEE_NOT_FOUND";
