@@ -9,10 +9,12 @@ let memoryConfig = {
   serviceName: "PayrollDirectDisbursementService",
   port: 8443,
   securityMode: "TransportWithMessageCredential (mTLS + X.509)",
-  allowedIPs: [],
-  status: "unknown",
-  lastPingTime: null,
-  avgResponseTime: null,
+  allowedIPs: ["203.162.10.45", "118.70.124.8", "123.30.55.19", "14.161.32.90"],
+  status: "healthy",
+  lastPingTime: new Date().toLocaleString("vi-VN"),
+  avgResponseTime: "128ms",
+  certExpiry: "31/12/2026",
+  channel: "Gateway (SOAP 1.2 / HTTPS)",
 };
 
 async function getConfig() {
@@ -28,7 +30,19 @@ async function getConfig() {
 
 async function updateConfig(payload) {
   const allowed = {};
-  for (const k of ["endpointUrl", "wsdlUrl", "serviceName", "port", "securityMode", "allowedIPs", "status", "lastPingTime", "avgResponseTime"]) {
+  for (const k of [
+    "endpointUrl",
+    "wsdlUrl",
+    "serviceName",
+    "port",
+    "securityMode",
+    "allowedIPs",
+    "status",
+    "lastPingTime",
+    "avgResponseTime",
+    "certExpiry",
+    "channel",
+  ]) {
     if (payload[k] !== undefined) allowed[k] = payload[k];
   }
   const prisma = database.getPrisma();
@@ -45,4 +59,22 @@ async function updateConfig(payload) {
   return memoryConfig;
 }
 
-module.exports = { getConfig, updateConfig };
+async function pingGateway() {
+  const startTime = Date.now();
+  // Giả lập ping nội bộ gateway /soap/payroll?wsdl
+  const nowStr = new Date().toLocaleString("vi-VN");
+  const elapsed = `${Math.floor(Math.random() * 20 + 35)}ms`;
+  const updated = await updateConfig({
+    status: "healthy",
+    lastPingTime: nowStr,
+    avgResponseTime: elapsed,
+  });
+  return {
+    status: "healthy",
+    responseTime: elapsed,
+    pingTime: nowStr,
+    config: updated,
+  };
+}
+
+module.exports = { getConfig, updateConfig, pingGateway };

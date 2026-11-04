@@ -1,5 +1,30 @@
 "use strict";
 
+function formatDateVN(dateInput) {
+  if (!dateInput) {
+    const now = new Date();
+    const d = String(now.getDate()).padStart(2, "0");
+    const m = String(now.getMonth() + 1).padStart(2, "0");
+    const y = now.getFullYear();
+    return `${d}/${m}/${y}`;
+  }
+  const str = String(dateInput).trim();
+  const slashMatch = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (slashMatch) {
+    return `${slashMatch[1].padStart(2, "0")}/${slashMatch[2].padStart(2, "0")}/${slashMatch[3]}`;
+  }
+  const hyphenMatch = str.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
+  if (hyphenMatch) {
+    return `${hyphenMatch[1].padStart(2, "0")}/${hyphenMatch[2].padStart(2, "0")}/${hyphenMatch[3]}`;
+  }
+  const isoMatch = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (isoMatch) {
+    return `${isoMatch[3].padStart(2, "0")}/${isoMatch[2].padStart(2, "0")}/${isoMatch[1]}`;
+  }
+  return str;
+}
+
+
 const NewsService = require("../services/NewsService");
 const { validateCreateNews } = require("../validators/newsValidator");
 const errorCodes = require("../utils/errors");
@@ -41,10 +66,11 @@ async function createNews(req, res, next) {
       title: req.body.title.trim(),
       summary: req.body.summary.trim(),
       content: req.body.content.trim(),
-      date: req.body.date || new Date().toLocaleDateString("vi-VN").replace(/\//g, "-"),
+      date: formatDateVN(req.body.date),
       tag: req.body.tag ? req.body.tag.trim() : "Thông báo chung",
       tagTone: req.body.tagTone || "primary",
       pinned: Boolean(req.body.pinned),
+      branch: req.body.branch ? req.body.branch.trim() : "Toàn công ty",
     });
 
     return res.status(201).json({

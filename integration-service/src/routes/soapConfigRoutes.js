@@ -7,5 +7,6 @@ const router = express.Router();
 
 router.get("/", SoapConfigController.getSoapConfig);
 router.put("/", SoapConfigController.updateSoapConfig);
+router.post("/ping", SoapConfigController.pingSoapGateway);
 
 module.exports = router;

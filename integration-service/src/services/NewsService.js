@@ -34,6 +34,7 @@ async function create(data) {
       id: data.id || `news-${Date.now()}`,
       pinned: false,
       tagTone: "primary",
+      branch: "Toàn công ty",
       ...data,
       createdAt: new Date(),
       updatedAt: new Date(),
