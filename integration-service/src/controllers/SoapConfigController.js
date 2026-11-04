@@ -20,4 +20,13 @@ async function updateSoapConfig(req, res, next) {
   }
 }
 
-module.exports = { getSoapConfig, updateSoapConfig };
+async function pingSoapGateway(_req, res, next) {
+  try {
+    const result = await SoapConfigService.pingGateway();
+    return res.status(200).json({ data: result, message: "Kiểm tra kết nối thành công" });
+  } catch (e) {
+    return next(e);
+  }
+}
+
+module.exports = { getSoapConfig, updateSoapConfig, pingSoapGateway };

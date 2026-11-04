@@ -38,7 +38,7 @@ test("bank-accounts + payout idempotent + payslip generate", { timeout: 90000 },
   });
   body = await res.json();
   assert.equal(res.status, 201);
-  assert.ok(String(body.data.id).startsWith("TXN-"));
+  assert.ok(String(body.data.id).startsWith("GD-"));
   assert.ok(String(body.data.bankReference).startsWith("BANK-"));
   assert.equal(body.data.deduped, undefined);
 

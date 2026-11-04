@@ -1,5 +1,30 @@
 "use strict";
 
+function formatDateVN(dateInput) {
+  if (!dateInput) {
+    const now = new Date();
+    const d = String(now.getDate()).padStart(2, "0");
+    const m = String(now.getMonth() + 1).padStart(2, "0");
+    const y = now.getFullYear();
+    return `${d}/${m}/${y}`;
+  }
+  const str = String(dateInput).trim();
+  const slashMatch = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (slashMatch) {
+    return `${slashMatch[1].padStart(2, "0")}/${slashMatch[2].padStart(2, "0")}/${slashMatch[3]}`;
+  }
+  const hyphenMatch = str.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
+  if (hyphenMatch) {
+    return `${hyphenMatch[1].padStart(2, "0")}/${hyphenMatch[2].padStart(2, "0")}/${hyphenMatch[3]}`;
+  }
+  const isoMatch = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (isoMatch) {
+    return `${isoMatch[3].padStart(2, "0")}/${isoMatch[2].padStart(2, "0")}/${isoMatch[1]}`;
+  }
+  return str;
+}
+
+
 const RegulationService = require("../services/RegulationService");
 const { validateCreateRegulation } = require("../validators/regulationValidator");
 const errorCodes = require("../utils/errors");
@@ -49,7 +74,7 @@ async function createRegulation(req, res, next) {
       content: req.body.content.trim(),
       status: req.body.status || "hiệu lực",
       scope: req.body.scope || "Toàn công ty",
-      effectiveDate: req.body.effectiveDate || new Date().toLocaleDateString("vi-VN").replace(/\//g, "-"),
+      effectiveDate: formatDateVN(req.body.effectiveDate),
       expiryDate: req.body.expiryDate || null,
       version: req.body.version || "1.0",
       pinned: Boolean(req.body.pinned),

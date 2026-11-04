@@ -61,6 +61,8 @@ model SoapGatewayConfig {
   status          String   @default("unknown")
   lastPingTime    String?
   avgResponseTime String?
+  certExpiry      String?
+  channel         String?  @default("Gateway (REST/SOAP)")
 
   @@map("soap_gateway_configs")
 }
@@ -74,6 +76,7 @@ model News {
   tag       String
   tagTone   String   @default("primary") // danger | warning | success | primary | gray
   pinned    Boolean  @default(false)
+  branch    String   @default("Toàn công ty")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

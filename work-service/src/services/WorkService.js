@@ -38,6 +38,45 @@ function sanitizeShiftPayload(payload = {}) {
   return cleaned;
 }
 
+function sanitizeAttendanceConfigPayload(payload = {}) {
+  const allowed = [
+    "latePenaltyAmount",
+    "earlyLeavePenaltyAmount",
+    "gracePeriodMinutes",
+    "autoCloseShift",
+    "shiftSwapMode",
+    "latePenaltyPct",
+    "earlyLeavePenaltyPct",
+    "earlyCheckinMinutes",
+    "maxPenaltiesPerMonth",
+    "deductOnCheckout",
+    "allowDoubleCheckin",
+    "maxCheckinsPerDay",
+    "maxSwapsPerMonth",
+    "requireReasonSwap",
+  ];
+  const cleaned = {};
+  for (const k of allowed) {
+    if (payload[k] !== undefined) {
+      if (typeof payload[k] === "boolean") {
+        cleaned[k] = payload[k];
+      } else if (typeof payload[k] === "number") {
+        cleaned[k] = Math.round(payload[k]);
+      } else if (typeof payload[k] === "string") {
+        if (k === "shiftSwapMode") {
+          cleaned[k] = payload[k];
+        } else {
+          const parsed = parseInt(payload[k], 10);
+          if (!isNaN(parsed)) {
+            cleaned[k] = parsed;
+          }
+        }
+      }
+    }
+  }
+  return cleaned;
+}
+
 function sanitizeTaskPayload(payload = {}) {
   const allowed = [
     "title",
@@ -83,22 +122,28 @@ async function ensureSeeded() {
         console.log("[work-service] Đã khởi tạo 3 khung ca mẫu mặc định vào DB");
       }
 
-      const regCount = await prisma.shiftRegistration.count();
-      if (regCount === 0) {
-        await prisma.shiftRegistration.createMany({
-          data: [
-            { employeeId: "NV-0003", branchSlug: "HN-1", shiftId: "t1", wish: "02/11" },
-            { employeeId: "NV-0003", branchSlug: "HN-1", shiftId: "t1", wish: "03/11" },
-            { employeeId: "NV-0003", branchSlug: "HN-1", shiftId: "t2", wish: "04/11" },
-            { employeeId: "NV-0003", branchSlug: "HN-1", shiftId: "t1", wish: "06/11" },
-            { employeeId: "NV-0003", branchSlug: "HN-1", shiftId: "t2", wish: "07/11" },
-            { employeeId: "NV-0002", branchSlug: "HN-1", shiftId: "t2", wish: "03/11" },
-            { employeeId: "NV-0002", branchSlug: "HN-1", shiftId: "t2", wish: "04/11" },
-            { employeeId: "NV-0002", branchSlug: "HN-1", shiftId: "t1", wish: "05/11" },
-            { employeeId: "NV-0002", branchSlug: "HN-1", shiftId: "t3", wish: "06/11" },
-          ],
+      const existingConfig = await prisma.attendanceConfig.findUnique({ where: { id: "default" } });
+      if (!existingConfig) {
+        await prisma.attendanceConfig.create({
+          data: {
+            id: "default",
+            latePenaltyAmount: 20000,
+            earlyLeavePenaltyAmount: 0,
+            gracePeriodMinutes: 5,
+            autoCloseShift: false,
+            shiftSwapMode: "manual",
+            latePenaltyPct: 10,
+            earlyLeavePenaltyPct: 10,
+            earlyCheckinMinutes: 15,
+            maxPenaltiesPerMonth: 10,
+            deductOnCheckout: true,
+            allowDoubleCheckin: true,
+            maxCheckinsPerDay: 3,
+            maxSwapsPerMonth: 3,
+            requireReasonSwap: true,
+          },
         });
-        console.log("[work-service] Đã khởi tạo dữ liệu đăng ký ca mẫu vào DB");
+        console.log("[work-service] Đã khởi tạo attendanceConfig default vào DB");
       }
     } catch (e) {
       console.warn("[work-service] Seed shift data lỗi:", e.message);
@@ -251,21 +296,54 @@ async function getConfig() {
   const prisma = database.getPrisma();
   if (prisma) {
     try {
-      const cfg = await prisma.attendanceConfig.findUnique({ where: { id: "default" } });
-      if (cfg) return cfg;
-    } catch (_) {}
+      let cfg = await prisma.attendanceConfig.findUnique({ where: { id: "default" } });
+      if (!cfg) {
+        cfg = await prisma.attendanceConfig.create({
+          data: {
+            id: "default",
+            latePenaltyAmount: 20000,
+            earlyLeavePenaltyAmount: 0,
+            gracePeriodMinutes: 5,
+            autoCloseShift: false,
+            shiftSwapMode: "manual",
+            latePenaltyPct: 10,
+            earlyLeavePenaltyPct: 10,
+            earlyCheckinMinutes: 15,
+            maxPenaltiesPerMonth: 10,
+            deductOnCheckout: true,
+            allowDoubleCheckin: true,
+            maxCheckinsPerDay: 3,
+            maxSwapsPerMonth: 3,
+            requireReasonSwap: true,
+          },
+        });
+      }
+      memoryConfig = { ...memoryConfig, ...cfg };
+      return cfg;
+    } catch (err) {
+      console.error("[work-service] Lỗi getConfig từ DB:", err);
+    }
   }
   return memoryConfig;
 }
 
 async function updateConfig(payload) {
+  const data = sanitizeAttendanceConfigPayload(payload);
   const prisma = database.getPrisma();
   if (prisma) {
     try {
-      return await prisma.attendanceConfig.update({ where: { id: "default" }, data: payload });
-    } catch (_) {}
+      const res = await prisma.attendanceConfig.upsert({
+        where: { id: "default" },
+        create: { id: "default", ...data },
+        update: data,
+      });
+      memoryConfig = { ...memoryConfig, ...res };
+      return res;
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.attendanceConfig.upsert:", err);
+    }
   }
-  memoryConfig = { ...memoryConfig, ...payload };
+  memoryConfig = { ...memoryConfig, ...data };
   return memoryConfig;
 }
 

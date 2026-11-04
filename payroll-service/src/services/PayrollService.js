@@ -46,7 +46,7 @@ async function listBankAccounts() {
 
 async function updateBankAccount(id, payload) {
   const allowed = {};
-  for (const k of ["accountName", "bankName", "status", "balance", "isPrimary"]) {
+  for (const k of ["accountName", "bankName", "branch", "status", "balance", "isPrimary"]) {
     if (payload[k] !== undefined) allowed[k] = payload[k];
   }
   const prisma = database.getPrisma();
@@ -161,6 +161,26 @@ async function findByIdempotencyKey(key) {
   return memoryPayouts.find((p) => p.idempotencyKey === key) || null;
 }
 
+async function nextPayoutId() {
+  const prisma = database.getPrisma();
+  let max = 0;
+  const scan = (raw) => {
+    const s = String(raw || "").trim().toUpperCase();
+    if (!s.startsWith("GD-")) return;
+    const n = Number(s.slice(3));
+    if (Number.isInteger(n) && n > max) max = n;
+  };
+  if (prisma) {
+    const rows = await prisma.payout
+      .findMany({ where: { id: { startsWith: "GD-" } }, select: { id: true } })
+      .catch(() => []);
+    rows.forEach((r) => scan(r.id));
+  } else {
+    memoryPayouts.forEach((r) => scan(r.id));
+  }
+  return `GD-${String(max + 1).padStart(4, "0")}`;
+}
+
 async function createPayout({ idempotencyKey, debitAccount: debitAcc, content, totalAmount, beneficiaryCount }) {
   const existed = await findByIdempotencyKey(idempotencyKey);
   if (existed) return { ...existed, deduped: true };
@@ -169,7 +189,7 @@ async function createPayout({ idempotencyKey, debitAccount: debitAcc, content, t
 
   const prisma = database.getPrisma();
   const row = {
-    id: uid("TXN"),
+    id: await nextPayoutId(),
     bankReference: bankRef(),
     debitAccount: debitAcc,
     totalAmount,
