@@ -38,6 +38,7 @@ app.use("/api/requests", require("./routes/requestRoutes"));
 app.use("/api/notifications", require("./routes/notificationRoutes"));
 app.use("/api/soap-config", require("./routes/soapConfigRoutes"));
 app.use("/api/upload", require("./routes/uploadRoutes"));
+app.use("/api/backlog", require("./routes/backlogRoutes"));
 // SOAP ngân hàng: chuyển tiếp nguyên vẹn body/headers/status XML.
 app.use("/soap/payroll", require("./routes/soapRoutes"));
 

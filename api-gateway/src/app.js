@@ -40,6 +40,7 @@ function proxyTo(pathFilter, target, label) {
         // Chuyển danh tính đã verify sang service phía sau, service không cần re-verify.
         if (req.user) {
           if (req.user.userId) proxyReq.setHeader("x-user-id", String(req.user.userId));
+          if (req.user.email) proxyReq.setHeader("x-user-email", String(req.user.email));
           if (req.user.role) proxyReq.setHeader("x-user-role", String(req.user.role));
           if (req.user.branchSlug) proxyReq.setHeader("x-branch-slug", String(req.user.branchSlug));
         }
@@ -76,6 +77,7 @@ app.use(proxyTo("/api/requests", config.targets.integration, "integration-servic
 app.use(proxyTo("/api/notifications", config.targets.integration, "integration-service"));
 app.use(proxyTo("/api/soap-config", config.targets.integration, "integration-service"));
 app.use(proxyTo("/api/upload", config.targets.integration, "integration-service"));
+app.use(proxyTo("/api/backlog", config.targets.integration, "integration-service"));
 
 app.use((_req, res) => {
   res.status(404).json({ error: { code: "NOT_FOUND", message: "Không tìm thấy tài nguyên" } });

@@ -27,4 +27,13 @@ class DuplicateError extends Error {
   }
 }
 
-module.exports = { ValidationError, NotFoundError, DuplicateError };
+class ForbiddenError extends Error {
+  constructor(message) {
+    super(message || "Không có quyền thực hiện thao tác");
+    this.name = "ForbiddenError";
+    this.status = 403;
+    this.code = "FORBIDDEN";
+  }
+}
+
+module.exports = { ValidationError, NotFoundError, DuplicateError, ForbiddenError };
