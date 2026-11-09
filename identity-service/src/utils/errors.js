@@ -20,10 +20,16 @@ class UnauthorizedError extends AppError {
   }
 }
 
+class ForbiddenError extends AppError {
+  constructor(message = "Không có quyền thực hiện thao tác này") {
+    super(message, "FORBIDDEN", 403);
+  }
+}
+
 class NotFoundError extends AppError {
   constructor(message = "Không tìm thấy tài nguyên") {
     super(message, "NOT_FOUND", 404);
   }
 }
 
-module.exports = { AppError, ValidationError, UnauthorizedError, NotFoundError };
+module.exports = { AppError, ValidationError, UnauthorizedError, ForbiddenError, NotFoundError };

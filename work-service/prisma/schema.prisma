@@ -80,7 +80,6 @@ model ShiftRegistration {
   branchSlug String?
   week       String?
   shiftId    String?
-  wish       String?
   createdAt  DateTime @default(now())
 
   @@map("shift_registrations")

@@ -5,6 +5,7 @@ const WifiConfigController = require("../controllers/WifiConfigController");
 
 const router = express.Router();
 
+router.get("/scan", WifiConfigController.scanNearbyWifi);
 router.get("/", WifiConfigController.getAllWifiConfigs);
 router.get("/:id", WifiConfigController.getWifiConfigById);
 router.post("/", WifiConfigController.createWifiConfig);

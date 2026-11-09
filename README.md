@@ -98,41 +98,41 @@ npm run dev
 ```
 
 ### Bước 2: Khởi động các Microservices (Mở các terminal riêng)
-Mỗi service đều có file `.env.example` và file `.env` đã được chuẩn bị sẵn. Hãy tiến hành push schema và nạp dữ liệu mẫu:
+Mỗi service đều có file `.env.example` và file `.env` đã được chuẩn bị sẵn. Hãy tiến hành áp migration (dựng được cả DB trắng, không xóa dữ liệu) và nạp dữ liệu mẫu:
 
 ```bash
 # 1. Identity Service (Port 4001)
 cd identity-service
 npm install
-npx prisma db push
+npx prisma migrate deploy
 node prisma/seed.js
 npm run dev
 
 # 2. Organization Service (Port 4002)
 cd organization-service
 npm install
-npx prisma db push
+npx prisma migrate deploy
 node prisma/seed.js
 npm run dev
 
 # 3. Work Service (Port 4003)
 cd work-service
 npm install
-npx prisma db push
+npx prisma migrate deploy
 node prisma/seed.js
 npm run dev
 
 # 4. Payroll Service (Port 4004)
 cd payroll-service
 npm install
-npx prisma db push
+npx prisma migrate deploy
 node prisma/seed.js
 npm run dev
 
 # 5. Integration Service (Port 4005)
 cd integration-service
 npm install
-npx prisma db push
+npx prisma migrate deploy
 npm run dev
 ```
 

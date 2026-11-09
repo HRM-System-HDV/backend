@@ -4,9 +4,23 @@ const NotificationService = require("../services/NotificationService");
 const { validateCreateNotification } = require("../validators/notificationValidator");
 const errorCodes = require("../utils/errors");
 
+// Nhân viên chỉ được xem phạm vi của chính mình, kể cả khi client gửi employeeId
+// của người khác. Quản lý/admin giữ quyền xem theo chi nhánh.
+function notificationScope(req) {
+  const role = req.headers["x-user-role"];
+  const userId = req.headers["x-user-id"];
+  if (userId && role !== "admin" && role !== "manager") {
+    return { employeeId: userId, branchSlug: null };
+  }
+  return {
+    employeeId: req.query.employeeId || userId || null,
+    branchSlug: req.query.branchSlug || req.headers["x-branch-slug"] || null,
+  };
+}
+
 async function listNotifications(req, res, next) {
   try {
-    const rows = await NotificationService.findMany(req.query);
+    const rows = await NotificationService.findMany(notificationScope(req));
     return res.status(200).json({ data: rows, message: "Thao tác thành công" });
   } catch (error) {
     return next(error);
@@ -78,8 +92,7 @@ async function markAsRead(req, res, next) {
 
 async function markAllAsRead(req, res, next) {
   try {
-    const employeeId = req.query.employeeId || req.headers["x-user-id"] || null;
-    const branchSlug = req.query.branchSlug || req.headers["x-branch-slug"] || null;
+    const { employeeId, branchSlug } = notificationScope(req);
     const result = await NotificationService.markAllAsRead({ employeeId, branchSlug });
     return res.status(200).json({
       data: result,

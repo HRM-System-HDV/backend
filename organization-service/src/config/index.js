@@ -9,4 +9,5 @@ module.exports = {
   databaseUrl: process.env.DATABASE_URL || "",
   corsOrigin: (process.env.CORS_ORIGIN || "http://localhost:3000").split(","),
   identityUrl: process.env.IDENTITY_URL || "http://localhost:4001",
+  internalToken: process.env.INTERNAL_API_TOKEN || "dev_only_internal_token_thay_khi_deploy",
 };

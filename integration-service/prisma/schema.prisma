@@ -11,20 +11,21 @@ datasource db {
 }
 
 model Request {
-  id            String   @id @default(cuid())
-  type          String   // leave | overtime | advance | shift_swap | work_supplement | other
-  employeeId    String
-  branchSlug    String?
-  title         String
-  content       String
-  attachmentUrl String?
-  status        String   @default("pending") // pending | approved | rejected
-  reviewedBy    String?
-  reviewNote    String?
-  sourceShiftId String?
-  targetShiftId String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id               String   @id @default(cuid())
+  type             String   // leave | overtime | advance | shift_swap | work_supplement | other
+  employeeId       String
+  targetEmployeeId String?  // Nhân viên được nhờ làm thay / đổi ca (người phản hồi)
+  branchSlug       String?
+  title            String
+  content          String
+  attachmentUrl    String?
+  status           String   @default("pending") // pending | approved | rejected
+  reviewedBy       String?
+  reviewNote       String?
+  sourceShiftId    String?
+  targetShiftId    String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   @@map("requests")
 }
@@ -48,6 +49,19 @@ model Notification {
   createdAt        DateTime @default(now())
 
   @@map("notifications")
+}
+
+// Cài đặt nhận thông báo của từng người dùng (id = x-user-id do gateway xác thực).
+model NotificationSetting {
+  id             String   @id
+  remindCheckIn  Boolean  @default(true)
+  remindCheckOut Boolean  @default(true)
+  remindShift    Boolean  @default(true)
+  notifyTask     Boolean  @default(true)
+  notifyLeave    Boolean  @default(true)
+  updatedAt      DateTime @updatedAt
+
+  @@map("notification_settings")
 }
 
 model SoapGatewayConfig {
@@ -113,4 +127,21 @@ model WifiConfig {
   updatedAt DateTime @updatedAt
 
   @@map("wifi_configs")
+}
+
+// BacklogService tạo bảng này bằng raw SQL. Phải khai báo ở đây, nếu không
+// `prisma db push` coi là bảng lạ và DROP mất nhật ký hoạt động.
+model Backlog {
+  id          String    @id
+  timestamp   String
+  userName    String    @map("user_name")
+  userRole    String?   @default("staff") @map("user_role")
+  action      String
+  actionLabel String    @map("action_label")
+  module      String
+  targetName  String    @map("target_name")
+  description String?
+  createdAt   DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("backlogs")
 }

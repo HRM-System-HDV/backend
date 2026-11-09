@@ -18,4 +18,13 @@ class NotFoundError extends Error {
   }
 }
 
-module.exports = { ValidationError, NotFoundError };
+class ForbiddenError extends Error {
+  constructor(message) {
+    super(message || "Không có quyền thực hiện thao tác này");
+    this.name = "ForbiddenError";
+    this.status = 403;
+    this.code = "FORBIDDEN";
+  }
+}
+
+module.exports = { ValidationError, NotFoundError, ForbiddenError };

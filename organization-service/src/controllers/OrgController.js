@@ -3,6 +3,14 @@
 const OrgService = require("../services/OrgService");
 const { validateBranch, validateDepartment, validateEmployee } = require("../validators/orgValidator");
 const { ValidationError, NotFoundError, ForbiddenError } = require("../utils/errors");
+const {
+  callerFrom,
+  isSelf,
+  redactEmployee,
+  scopeEmployeeQuery,
+  assertCanReadEmployee,
+  assertCanWriteEmployee,
+} = require("../utils/employeeAccess");
 
 async function listBranches(_req, res, next) {
   try {
@@ -104,8 +112,12 @@ async function deleteDepartment(req, res, next) {
 
 async function listEmployees(req, res, next) {
   try {
-    const rows = await OrgService.listEmployees(req.query);
-    return res.status(200).json({ data: rows, message: "Thao tác thành công" });
+    const caller = callerFrom(req);
+    const rows = await OrgService.listEmployees(scopeEmployeeQuery(req.query, caller));
+    return res.status(200).json({
+      data: rows.map((row) => redactEmployee(row, caller)),
+      message: "Thao tác thành công",
+    });
   } catch (e) {
     return next(e);
   }
@@ -113,8 +125,10 @@ async function listEmployees(req, res, next) {
 
 async function getEmployee(req, res, next) {
   try {
+    const caller = callerFrom(req);
     const row = await OrgService.getEmployee(req.params.id);
-    return res.status(200).json({ data: row, message: "Thao tác thành công" });
+    assertCanReadEmployee(row, caller);
+    return res.status(200).json({ data: redactEmployee(row, caller), message: "Thao tác thành công" });
   } catch (e) {
     return next(e);
   }
@@ -135,13 +149,16 @@ async function updateEmployee(req, res, next) {
   try {
     const errors = validateEmployee(req.body, true);
     if (errors.length) throw new ValidationError(errors.join("; "));
-    const row = await OrgService.updateEmployee(req.params.id, req.body);
+    const caller = callerFrom(req);
+    const existing = await OrgService.getEmployee(req.params.id);
+    const payload = assertCanWriteEmployee(existing, caller, req.body);
+    const row = await OrgService.updateEmployee(req.params.id, payload);
     if (!row) {
       const err = new NotFoundError("Không tìm thấy thông tin nhân sự trên hệ thống");
       err.code = "EMPLOYEE_NOT_FOUND";
       throw err;
     }
-    return res.status(200).json({ data: row, message: "Thao tác thành công" });
+    return res.status(200).json({ data: redactEmployee(row, caller), message: "Thao tác thành công" });
   } catch (e) {
     return next(e);
   }
@@ -186,6 +203,11 @@ async function deleteEmployee(req, res, next) {
 
 async function leaveEmployee(req, res, next) {
   try {
+    const caller = callerFrom(req);
+    const existing = await OrgService.getEmployee(req.params.id);
+    if (caller.role !== "admin" && !isSelf(existing, caller)) {
+      throw new ForbiddenError("Bạn chỉ được xác nhận thôi việc cho chính mình");
+    }
     const row = await OrgService.updateEmployee(req.params.id, {
       status: "resigned",
       resignedAt: new Date().toISOString(),

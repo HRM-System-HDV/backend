@@ -94,10 +94,32 @@ async function deleteWifiConfig(req, res, next) {
   }
 }
 
+async function scanNearbyWifi(req, res, next) {
+  try {
+    const { exec } = require("child_process");
+    // Chỉ trả SSID thật của máy chủ. BSSID/cường độ sóng/bảo mật không đo được
+    // bằng networksetup nên không bịa ra; client tự hiển thị "không rõ".
+    exec("networksetup -listpreferredwirelessnetworks en0", { timeout: 5000 }, (err, stdout) => {
+      if (err) {
+        return res.status(200).json({ data: [], message: "Không quét được Wi-Fi trên máy chủ" });
+      }
+      const list = (stdout || "")
+        .split("\n")
+        .map((s) => s.trim())
+        .filter((s) => s && !s.startsWith("Preferred networks") && !s.startsWith("You are not"));
+      const results = [...new Set(list)].slice(0, 15).map((ssid) => ({ ssid }));
+      return res.status(200).json({ data: results });
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 module.exports = {
   getAllWifiConfigs,
   getWifiConfigById,
   createWifiConfig,
   updateWifiConfig,
   deleteWifiConfig,
+  scanNearbyWifi,
 };

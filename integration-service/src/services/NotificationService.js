@@ -120,22 +120,45 @@ async function deleteById(id) {
 
 let memorySettings = {};
 
+const DEFAULT_SETTINGS = {
+  remindCheckIn: true,
+  remindCheckOut: true,
+  remindShift: true,
+  notifyTask: true,
+  notifyLeave: true,
+};
+
+// Chỉ nhận đúng các khóa boolean đã biết, bỏ qua field lạ client gửi lên.
+function pickSettings(data = {}) {
+  const out = {};
+  for (const key of Object.keys(DEFAULT_SETTINGS)) {
+    if (typeof data[key] === "boolean") out[key] = data[key];
+  }
+  return out;
+}
+
 async function getSettings(userId) {
-  return memorySettings[userId] || {
-    remindCheckIn: true,
-    remindCheckOut: true,
-    remindShift: true,
-    notifyTask: true,
-    notifyLeave: true,
-  };
+  const prisma = database.getPrisma();
+  if (!prisma) {
+    return { ...DEFAULT_SETTINGS, ...(memorySettings[userId] || {}) };
+  }
+  const row = await prisma.notificationSetting.findUnique({ where: { id: userId } });
+  return { ...DEFAULT_SETTINGS, ...pickSettings(row || {}) };
 }
 
 async function updateSettings(userId, data) {
-  memorySettings[userId] = {
-    ...(await getSettings(userId)),
-    ...data,
-  };
-  return memorySettings[userId];
+  const patch = pickSettings(data);
+  const prisma = database.getPrisma();
+  if (!prisma) {
+    memorySettings[userId] = { ...(memorySettings[userId] || {}), ...patch };
+    return { ...DEFAULT_SETTINGS, ...memorySettings[userId] };
+  }
+  const row = await prisma.notificationSetting.upsert({
+    where: { id: userId },
+    create: { id: userId, ...patch },
+    update: patch,
+  });
+  return { ...DEFAULT_SETTINGS, ...pickSettings(row) };
 }
 
 module.exports = {

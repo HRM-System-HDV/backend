@@ -62,9 +62,11 @@ test("requests CRUD + duyệt tự sinh thông báo", async () => {
   res = await fetch(`${base}/api/requests/${reqId}`);
   assert.equal(res.status, 200);
 
-  // Đếm thông báo của nhân viên trước duyệt
+  // Đếm thông báo đích danh của nhân viên trước duyệt.
+  // Bỏ qua broadcast vì file test khác chạy song song có thể tạo thêm.
+  const countTargeted = (list) => list.filter((n) => n.targetEmployeeId === "e-staff-9").length;
   res = await fetch(`${base}/api/notifications?employeeId=e-staff-9`);
-  const before = (await res.json()).data.length;
+  const before = countTargeted((await res.json()).data);
 
   // Duyệt -> sinh thông báo
   res = await fetch(`${base}/api/requests/${reqId}/approve`, {
@@ -77,7 +79,7 @@ test("requests CRUD + duyệt tự sinh thông báo", async () => {
   assert.equal(body.data.status, "approved");
 
   res = await fetch(`${base}/api/notifications?employeeId=e-staff-9`);
-  const after = (await res.json()).data.length;
+  const after = countTargeted((await res.json()).data);
   assert.equal(after, before + 1);
 
   // Duyệt lần 2 -> 400 (không còn pending)
@@ -108,6 +110,82 @@ test("requests CRUD + duyệt tự sinh thông báo", async () => {
   res = await fetch(`${base}/api/requests/${req2}`, { method: "DELETE" });
   assert.equal(res.status, 400);
 
+  } finally {
+    server.close();
+  }
+});
+
+test("nhờ làm thay: thông báo mang requestId và chỉ người nhận được phản hồi", async () => {
+  const app = require("../../src/app");
+  const server = app.listen(0);
+  await new Promise((r) => server.on("listening", r));
+  const base = `http://localhost:${server.address().port}`;
+  const json = { "Content-Type": "application/json" };
+  const sender = "e-cover-sender";
+  const target = "e-cover-target";
+
+  try {
+    let res = await fetch(`${base}/api/requests`, {
+      method: "POST",
+      headers: json,
+      body: JSON.stringify({
+        type: "overtime",
+        employeeId: sender,
+        targetEmployeeId: target,
+        branchSlug: "CN01",
+        title: "Nhờ làm thay: Ca sáng",
+        content: "Nhờ bạn làm thay ca sáng",
+        notification: {
+          requestType: "cover",
+          shiftName: "Ca sáng",
+          shiftDate: "09/11/2026",
+          shiftTime: "08:00 - 12:00",
+          branch: "CN01",
+          senderName: "Người gửi",
+        },
+      }),
+    });
+    const reqBody = await res.json();
+    assert.equal(res.status, 201);
+    const requestId = reqBody.data.id;
+    assert.equal(reqBody.data.targetEmployeeId, target);
+
+    // Thông báo cho người được nhờ phải mang metadata.requestId = id đơn thật.
+    res = await fetch(`${base}/api/notifications?employeeId=${target}`);
+    const notifs = (await res.json()).data;
+    const notif = notifs.find((n) => n.metadata && n.metadata.requestId === requestId);
+    assert.ok(notif, "phải có thông báo gắn requestId");
+    assert.equal(notif.requestType, "cover");
+    assert.equal(notif.metadata.requestStatus, "pending");
+
+    // Người khác không được phản hồi
+    res = await fetch(`${base}/api/requests/${requestId}/respond`, {
+      method: "PUT",
+      headers: { ...json, "x-user-id": "e-cover-other" },
+      body: JSON.stringify({ accept: true }),
+    });
+    assert.equal(res.status, 403);
+
+    // Đúng người nhận thì chấp nhận được
+    res = await fetch(`${base}/api/requests/${requestId}/respond`, {
+      method: "PUT",
+      headers: { ...json, "x-user-id": target },
+      body: JSON.stringify({ accept: true }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).data.status, "approved");
+
+    // Người gửi nhận thông báo kết quả
+    res = await fetch(`${base}/api/notifications?employeeId=${sender}`);
+    const senderNotifs = (await res.json()).data;
+    assert.ok(senderNotifs.some((n) => n.metadata && n.metadata.requestId === requestId
+      && n.metadata.requestStatus === "approved"));
+
+    // Dọn thông báo test
+    for (const n of [notif, ...senderNotifs.filter((x) => x.metadata && x.metadata.requestId === requestId)]) {
+      await fetch(`${base}/api/notifications/${n.id}`, { method: "DELETE" });
+    }
+    await fetch(`${base}/api/requests/${requestId}`, { method: "DELETE" });
   } finally {
     server.close();
   }
