@@ -38,20 +38,109 @@ async function findById(id) {
   return prisma.request.findUnique({ where: { id } });
 }
 
-async function create(data) {
+// Loại đơn cần đồng nghiệp (người được nhờ) phản hồi trước khi quản lý duyệt.
+const RESPONDABLE_TYPES = new Set(["overtime", "shift_swap"]);
+
+const NOTIFICATION_TEXT_FIELDS = [
+  "shiftName", "shiftDate", "shiftTime", "shiftHours",
+  "senderName", "senderRole", "senderPhone",
+];
+const NOTIFICATION_META_FIELDS = [
+  "branch", "shiftRole", "reason", "swapShiftName", "swapShiftTime",
+  "swapShiftHours", "swapShiftDate", "swapShiftBranch", "swapShiftRole",
+];
+const MAX_TEXT = 300;
+const MAX_REASON = 1000;
+
+function cleanText(value, max = MAX_TEXT) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, max) : null;
+}
+
+// Chỉ nhận đúng các khóa hiển thị đã biết, tránh client nhét field lạ vào thông báo.
+function sanitizeNotificationFields(payload = {}) {
+  const columns = {};
+  for (const key of NOTIFICATION_TEXT_FIELDS) {
+    const value = cleanText(payload[key], key === "senderPhone" ? 40 : MAX_TEXT);
+    if (value) columns[key] = value;
+  }
+  const metadata = {};
+  for (const key of NOTIFICATION_META_FIELDS) {
+    const value = cleanText(payload[key], key === "reason" ? MAX_REASON : MAX_TEXT);
+    if (value) metadata[key] = value;
+  }
+  return { columns, metadata };
+}
+
+function requestTypeOf(type) {
+  if (type === "shift_swap") return "swap";
+  if (type === "overtime") return "cover";
+  return null;
+}
+
+function notFoundError(message = "Không tìm thấy yêu cầu") {
+  const err = new Error(message);
+  err.status = 404;
+  err.code = "NOT_FOUND";
+  return err;
+}
+
+function validationError(message) {
+  const err = new Error(message);
+  err.status = 400;
+  err.code = "VALIDATION_ERROR";
+  return err;
+}
+
+function forbiddenError(message) {
+  const err = new Error(message);
+  err.status = 403;
+  err.code = "FORBIDDEN";
+  return err;
+}
+
+async function create(data, notification = null) {
   const prisma = database.getPrisma();
+  let created;
   if (!prisma) {
-    const newReq = {
+    created = {
       id: data.id || `req-${Date.now()}`,
       status: "pending",
       ...data,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
-    memoryRequests.unshift(newReq);
-    return newReq;
+    memoryRequests.unshift(created);
+  } else {
+    created = await prisma.request.create({ data });
   }
-  return prisma.request.create({ data });
+
+  // Nhờ làm thay / đổi ca: báo cho đồng nghiệp được nhờ, kèm requestId để
+  // mobile mở đúng đơn khi bấm vào thông báo (thay vì dùng id thông báo).
+  if (data.targetEmployeeId && RESPONDABLE_TYPES.has(data.type)) {
+    try {
+      const { columns, metadata } = sanitizeNotificationFields(notification || {});
+      await NotificationService.create({
+        targetEmployeeId: data.targetEmployeeId,
+        branchSlug: data.branchSlug || null,
+        title: created.title,
+        body: created.content,
+        requestType: requestTypeOf(data.type),
+        ...columns,
+        metadata: {
+          ...metadata,
+          requestId: created.id,
+          requestStatus: "pending",
+        },
+      });
+    } catch (e) {
+      // Không chặn việc tạo đơn nếu gửi thông báo lỗi.
+      console.warn("[integration-service] Gửi thông báo yêu cầu ca thất bại:", e.message);
+    }
+  }
+
+  return created;
 }
 
 async function update(id, data) {
@@ -79,17 +168,9 @@ async function deleteById(id) {
 
 async function reviewRequest(id, approved, { reviewedBy, reviewNote } = {}) {
   const row = await findById(id);
-  if (!row) {
-    const err = new Error("Không tìm thấy yêu cầu");
-    err.status = 404;
-    err.code = "NOT_FOUND";
-    throw err;
-  }
+  if (!row) throw notFoundError();
   if (row.status !== "pending") {
-    const err = new Error("Chỉ duyệt hoặc từ chối yêu cầu đang chờ xử lý");
-    err.status = 400;
-    err.code = "VALIDATION_ERROR";
-    throw err;
+    throw validationError("Chỉ duyệt hoặc từ chối yêu cầu đang chờ xử lý");
   }
   const updated = await update(id, {
     status: approved ? "approved" : "rejected",
@@ -103,6 +184,10 @@ async function reviewRequest(id, approved, { reviewedBy, reviewNote } = {}) {
     branchSlug: row.branchSlug,
     title: approved ? "Yêu cầu của bạn đã được duyệt" : "Yêu cầu của bạn đã bị từ chối",
     body: `${approved ? "Đã duyệt" : "Đã từ chối"}: ${row.title}${reviewNote ? ` — ${reviewNote}` : ""}`,
+    metadata: {
+      requestId: id,
+      requestStatus: approved ? "approved" : "rejected",
+    },
   });
 
   // Duyệt đổi ca: đẩy cập nhật sang work-service (best-effort, không chặn luồng duyệt).
@@ -126,6 +211,26 @@ async function rejectRequest(id, review = {}) {
   return reviewRequest(id, false, review);
 }
 
+// Đồng nghiệp được nhờ làm thay / đổi ca trả lời. Chỉ đúng người nhận đơn
+// (targetEmployeeId) mới được phản hồi, và chỉ khi đơn còn chờ xử lý.
+async function respondRequest(id, accepted, { responderId } = {}) {
+  const row = await findById(id);
+  if (!row) throw notFoundError();
+  if (!RESPONDABLE_TYPES.has(row.type)) {
+    throw validationError("Đơn này không cần đồng nghiệp phản hồi");
+  }
+  if (!responderId || row.targetEmployeeId !== responderId) {
+    throw forbiddenError("Bạn không phải người được nhờ trong yêu cầu này");
+  }
+  if (row.status !== "pending") {
+    throw validationError("Yêu cầu này đã được xử lý");
+  }
+  return reviewRequest(id, Boolean(accepted), {
+    reviewedBy: responderId,
+    reviewNote: accepted ? "Đồng nghiệp đã chấp nhận" : "Đồng nghiệp đã từ chối",
+  });
+}
+
 module.exports = {
   findMany,
   findById,
@@ -134,4 +239,5 @@ module.exports = {
   deleteById,
   approveRequest,
   rejectRequest,
+  respondRequest,
 };

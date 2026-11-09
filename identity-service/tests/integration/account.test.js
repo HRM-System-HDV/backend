@@ -63,7 +63,7 @@ describe("Identity Account Endpoints Integration", () => {
     assert.equal(body.data.removed, true);
   });
 
-  test("POST /api/auth/forgot-password đặt lại mật khẩu về mặc định", async () => {
+  test("POST /api/auth/forgot-password không reset và không lộ mật khẩu", async () => {
     const res = await fetch(`${baseUrl}/api/auth/forgot-password`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -71,8 +71,53 @@ describe("Identity Account Endpoints Integration", () => {
     });
     const body = await res.json();
     assert.equal(res.status, 200);
-    assert.equal(body.data.ok, true);
-    assert.equal(body.data.reset, true);
+    assert.equal(body.data.contactAdmin, true);
+    assert.equal(body.data.defaultPassword, undefined);
+    assert.equal(body.data.tempPassword, undefined);
+    assert.ok(!JSON.stringify(body).includes("123456"));
+
+    // Mật khẩu vẫn đăng nhập được như cũ, tức là không bị đặt lại.
+    const login = await fetch(`${baseUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "admin@company.com", password: "123456" }),
+    });
+    assert.equal(login.status, 200);
+  });
+
+  test("POST /api/auth/forgot-password trả lời giống nhau cho email không tồn tại", async () => {
+    const res = await fetch(`${baseUrl}/api/auth/forgot-password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "khong-ton-tai@company.com" }),
+    });
+    const body = await res.json();
+    assert.equal(res.status, 200);
+    assert.equal(body.data.contactAdmin, true);
+  });
+
+  test("POST /api/auth/reset-password chặn khi chưa đăng nhập", async () => {
+    const res = await fetch(`${baseUrl}/api/auth/reset-password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "admin@company.com" }),
+    });
+    assert.equal(res.status, 401);
+  });
+
+  test("POST /api/auth/reset-password chặn staff", async () => {
+    const login = await fetch(`${baseUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "nhanvien@company.com", password: "123456" }),
+    });
+    const staffCookie = (login.headers.get("set-cookie") || "").split(";")[0];
+    const res = await fetch(`${baseUrl}/api/auth/reset-password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: staffCookie },
+      body: JSON.stringify({ email: "admin@company.com" }),
+    });
+    assert.equal(res.status, 403);
   });
 
   test("POST /api/auth/change-password đổi mật khẩu thành công", async () => {

@@ -61,7 +61,9 @@ test("CRUD branches + departments + employees validation", async () => {
     assert.equal(res.status, 200);
     assert.ok(body.data.length >= 1);
 
-    // Employees: tạo staff + filter theo systemRole
+    // Employees: tạo staff + filter theo systemRole.
+    // Dịch vụ tin header do gateway truyền xuống: admin thì thấy mọi chi nhánh.
+    const asAdmin = { "Content-Type": "application/json", "x-user-role": "admin", "x-user-id": "admin-test" };
     res = await fetch(`${base}/api/employees`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -70,11 +72,17 @@ test("CRUD branches + departments + employees validation", async () => {
     body = await res.json();
     assert.equal(res.status, 201);
 
-    res = await fetch(`${base}/api/employees?systemRole=staff`);
+    res = await fetch(`${base}/api/employees?systemRole=staff`, { headers: asAdmin });
     body = await res.json();
     assert.equal(res.status, 200);
     assert.ok(body.data.every((e) => e.systemRole === "staff"));
     assert.ok(body.data.length >= 1);
+
+    // Không có danh tính từ gateway -> không thấy hồ sơ của ai (không mặc định admin).
+    res = await fetch(`${base}/api/employees?systemRole=staff`);
+    body = await res.json();
+    assert.equal(res.status, 200);
+    assert.equal(body.data.length, 0);
 
     // Email trùng -> 409
     res = await fetch(`${base}/api/employees`, {

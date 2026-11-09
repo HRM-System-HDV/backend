@@ -8,6 +8,7 @@ const { createProxyMiddleware } = require("http-proxy-middleware");
 const config = require("./config");
 const { errorHandler } = require("./middlewares/errorHandler");
 const { createAuthMiddleware } = require("./middlewares/auth");
+const { createAuthorizeMiddleware } = require("./middlewares/authorize");
 const { createRateLimitMiddleware } = require("./middlewares/rateLimit");
 
 const app = express();
@@ -24,6 +25,7 @@ app.get("/health", (_req, res) => {
 // Giới hạn tần suất + xác thực JWT trước khi proxy (TECHS.md §6.3).
 app.use(createRateLimitMiddleware());
 app.use(createAuthMiddleware());
+app.use(createAuthorizeMiddleware());
 
 function proxyTo(pathFilter, target, label) {
   // http-proxy-middleware v3: pathFilter nằm trong options, app.use không gắn
@@ -37,6 +39,11 @@ function proxyTo(pathFilter, target, label) {
     logLevel: "warn",
     on: {
       proxyReq: (proxyReq, req) => {
+        // Client có thể tự gửi x-user-* để giả danh, nhất là ở tuyến public nơi
+        // req.user chưa được set. Luôn xóa trước rồi mới gắn danh tính đã verify.
+        for (const h of ["x-user-id", "x-user-email", "x-user-role", "x-branch-slug"]) {
+          proxyReq.removeHeader(h);
+        }
         // Chuyển danh tính đã verify sang service phía sau, service không cần re-verify.
         if (req.user) {
           if (req.user.userId) proxyReq.setHeader("x-user-id", String(req.user.userId));

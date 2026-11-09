@@ -1,4 +1,4 @@
-﻿"use strict";
+"use strict";
 
 require("dotenv").config();
 
@@ -12,12 +12,12 @@ module.exports = {
   cookieName: process.env.COOKIE_NAME || "hrm-session",
   rateLimitWindowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || "60000", 10),
   rateLimitMax: parseInt(process.env.RATE_LIMIT_MAX || "50000", 10),
-  // Tuyến công khai không yêu cầu token.
+  // Tuyến công khai không yêu cầu token. Chỉ giữ đúng những gì cần trước khi
+  // đăng nhập; danh sách nhân viên/ca/chi nhánh đều phải xác thực.
   publicPaths: [
     { method: "POST", path: "/api/auth/login", exact: true },
     { method: "POST", path: "/api/auth/refresh", exact: true },
     { method: "POST", path: "/api/auth/forgot-password", exact: true },
-    { method: "POST", path: "/api/auth/sync-employee", exact: true },
     { method: "GET", path: "/soap/payroll", exact: false },
   ],
   targets: {

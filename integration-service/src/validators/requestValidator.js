@@ -25,6 +25,20 @@ function validateCreateRequest(payload) {
       errors.push("Đổi ca yêu cầu sourceShiftId và targetShiftId");
     }
   }
+  if (payload.targetEmployeeId !== undefined && payload.targetEmployeeId !== null) {
+    if (typeof payload.targetEmployeeId !== "string" || !payload.targetEmployeeId.trim()) {
+      errors.push("targetEmployeeId không hợp lệ");
+    } else if (payload.targetEmployeeId === payload.employeeId) {
+      errors.push("Không thể gửi yêu cầu cho chính mình");
+    }
+    if (payload.type !== "overtime" && payload.type !== "shift_swap") {
+      errors.push("Chỉ đơn làm thay / đổi ca mới có nhân viên nhận yêu cầu");
+    }
+  }
+  if (payload.notification !== undefined && payload.notification !== null
+    && typeof payload.notification !== "object") {
+    errors.push("notification không hợp lệ");
+  }
   return errors;
 }
 

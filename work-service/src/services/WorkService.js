@@ -228,25 +228,71 @@ async function deleteShift(id) {
 }
 
 async function registerShift(payload) {
-  const wish = payload.wish || payload.preference;
+  const week = payload.week || payload.preference || null;
+  const shiftId = payload.shiftId || null;
+
+  // Nếu shiftId là 'off', hủy tất cả đăng ký ca của nhân viên trong ngày/tuần đó
+  if (shiftId === "off") {
+    await unregisterShift({ employeeId: payload.employeeId, week });
+    return { ok: true, unregistered: true };
+  }
+
   const data = {
     employeeId: payload.employeeId,
     branchSlug: payload.branchSlug || null,
-    week: payload.week || null,
-    shiftId: payload.shiftId || null,
-    wish: wish || null,
+    week,
+    shiftId,
   };
   const prisma = database.getPrisma();
   if (prisma) {
     try {
+      // Tránh trùng lặp nếu đã đăng ký ca này vào ngày này rồi
+      const existing = await prisma.shiftRegistration.findFirst({
+        where: {
+          employeeId: data.employeeId,
+          week: data.week,
+          shiftId: data.shiftId,
+        },
+      });
+      if (existing) {
+        return existing;
+      }
       return await prisma.shiftRegistration.create({ data });
     } catch (err) {
       console.error("[work-service] Lỗi prisma.shiftRegistration.create:", err);
     }
   }
-  const row = { id: uid("reg"), ...data, preference: wish };
+  const existingMem = memoryRegistrations.find(
+    (r) => r.employeeId === data.employeeId && r.week === data.week && r.shiftId === data.shiftId
+  );
+  if (existingMem) return existingMem;
+  const row = { id: uid("reg"), ...data };
   memoryRegistrations.push(row);
   return row;
+}
+
+async function unregisterShift({ employeeId, shiftId, week }) {
+  const prisma = database.getPrisma();
+  if (prisma) {
+    try {
+      const where = {};
+      if (employeeId) where.employeeId = employeeId;
+      if (shiftId && shiftId !== "all" && shiftId !== "off") where.shiftId = shiftId;
+      if (week) where.week = week;
+      const result = await prisma.shiftRegistration.deleteMany({ where });
+      return result.count > 0;
+    } catch (err) {
+      console.error("[work-service] Lỗi unregisterShift:", err);
+    }
+  }
+  const beforeLen = memoryRegistrations.length;
+  memoryRegistrations = memoryRegistrations.filter((r) => {
+    if (employeeId && r.employeeId !== employeeId) return true;
+    if (week && r.week !== week) return true;
+    if (shiftId && shiftId !== "all" && shiftId !== "off" && r.shiftId !== shiftId) return true;
+    return false;
+  });
+  return memoryRegistrations.length < beforeLen;
 }
 
 async function listRegistrations(query = {}) {
@@ -257,8 +303,7 @@ async function listRegistrations(query = {}) {
       if (query.branchSlug) where.branchSlug = query.branchSlug;
       if (query.week) where.week = query.week;
       if (query.employeeId) where.employeeId = query.employeeId;
-      const rows = await prisma.shiftRegistration.findMany({ where, orderBy: { createdAt: "desc" } });
-      return rows.map((r) => ({ ...r, preference: r.wish }));
+      return await prisma.shiftRegistration.findMany({ where, orderBy: { createdAt: "desc" } });
     } catch (err) {
       console.error("[work-service] Lỗi prisma.shiftRegistration.findMany:", err);
     }
@@ -611,6 +656,7 @@ module.exports = {
   updateShift,
   deleteShift,
   registerShift,
+  unregisterShift,
   listRegistrations,
   deleteRegistration,
   getShiftById,

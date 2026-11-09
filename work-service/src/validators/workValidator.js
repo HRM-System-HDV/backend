@@ -10,8 +10,8 @@ function validateShift(body = {}) {
 function validateTask(body = {}) {
   const errors = [];
   if (!body.title) errors.push("Tiêu đề tác vụ là bắt buộc");
-  if (body.status && !["pending", "in_progress", "done"].includes(body.status)) {
-    errors.push("Trạng thái chỉ nhận pending/in_progress/done");
+  if (body.status && !["pending", "in_progress", "inProgress", "done", "completed", "overdue"].includes(body.status)) {
+    errors.push("Trạng thái chỉ nhận pending/in_progress/done/completed");
   }
   return errors;
 }

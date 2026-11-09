@@ -5,6 +5,7 @@ const {
   getMeUseCase,
   changePasswordUseCase,
   forgotPasswordUseCase,
+  resetPasswordByAdminUseCase,
   refreshTokenUseCase,
   getDevicesUseCase,
   revokeDeviceUseCase,
@@ -84,7 +85,24 @@ async function forgotPassword(req, res, next) {
     const result = await forgotPasswordUseCase(req.body);
     return res.status(200).json({
       data: result,
-      message: "Mật khẩu đã được đặt lại về 123456",
+      message: "Vui lòng liên hệ quản trị viên hoặc quản lý để được cấp lại mật khẩu",
+    });
+  } catch (e) {
+    return next(e);
+  }
+}
+
+async function resetPassword(req, res, next) {
+  try {
+    const errors = validateForgotPassword(req.body);
+    if (errors.length) throw new ValidationError(errors.join("; "));
+    const result = await resetPasswordByAdminUseCase({
+      email: req.body.email,
+      actor: req.user,
+    });
+    return res.status(200).json({
+      data: result,
+      message: "Đã cấp mật khẩu tạm, hãy chuyển cho nhân viên và yêu cầu họ đổi lại",
     });
   } catch (e) {
     return next(e);
@@ -127,6 +145,15 @@ async function syncEmployee(req, res, next) {
   try {
     const { employee, action } = req.body || {};
     const result = await syncEmployeeUseCase({ employee, action });
+    if (result && result.code) {
+      const message =
+        result.code === "ID_CONFLICT"
+          ? "Mã nhân sự đã thuộc một tài khoản khác"
+          : "Email đã thuộc một tài khoản khác";
+      return res.status(409).json({
+        error: { code: result.code, message, identityId: result.identityId },
+      });
+    }
     return res.status(200).json({ data: result, message: "Đồng bộ nhân sự thành công" });
   } catch (e) {
     return next(e);
@@ -139,6 +166,7 @@ module.exports = {
   logout,
   changePassword,
   forgotPassword,
+  resetPassword,
   refresh,
   getDevices,
   revokeDevice,

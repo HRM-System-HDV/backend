@@ -58,6 +58,7 @@ model Employee {
   systemRole        String   @default("staff")
   status            String   @default("đang làm")
   joinDate          String?
+  resignedAt        DateTime?
   baseSalary        Float    @default(0)
   salaryType        String   @default("monthly")
   hourlySalary      Float?

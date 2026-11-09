@@ -2,11 +2,19 @@
 
 const WorkService = require("../services/WorkService");
 const { validateShift, validateTask, validateAttendance } = require("../validators/workValidator");
-const { ValidationError, NotFoundError } = require("../utils/errors");
+const { ValidationError, NotFoundError, ForbiddenError } = require("../utils/errors");
+const {
+  callerFrom,
+  isPrivileged,
+  assertSelfEmployee,
+  scopeOwnQuery,
+  scopeTaskQuery,
+  scopeBranchQuery,
+} = require("../utils/caller");
 
 async function listShifts(req, res, next) {
   try {
-    const rows = await WorkService.listShifts(req.query);
+    const rows = await WorkService.listShifts(scopeBranchQuery(req.query, callerFrom(req)));
     return res.status(200).json({ data: rows, message: "Thao tác thành công" });
   } catch (e) {
     return next(e);
@@ -57,9 +65,26 @@ async function assignShift(req, res, next) {
 
 async function registerShift(req, res, next) {
   try {
-    if (!req.body.employeeId) throw new ValidationError("Thiếu employeeId để đăng ký ca");
-    const row = await WorkService.registerShift(req.body);
+    const body = assertSelfEmployee(req.body, callerFrom(req));
+    if (!body.employeeId) throw new ValidationError("Thiếu employeeId để đăng ký ca");
+    const row = await WorkService.registerShift(body);
     return res.status(201).json({ data: row, message: "Đăng ký ca thành công" });
+  } catch (e) {
+    return next(e);
+  }
+}
+
+async function unregisterShift(req, res, next) {
+  try {
+    const body = assertSelfEmployee(req.body, callerFrom(req));
+    const { employeeId, shiftId, week, preference } = body;
+    if (!employeeId) throw new ValidationError("Thiếu employeeId để hủy đăng ký ca");
+    await WorkService.unregisterShift({
+      employeeId,
+      shiftId,
+      week: week || preference,
+    });
+    return res.status(200).json({ data: { ok: true }, message: "Hủy đăng ký ca thành công" });
   } catch (e) {
     return next(e);
   }
@@ -67,7 +92,7 @@ async function registerShift(req, res, next) {
 
 async function listRegistrations(req, res, next) {
   try {
-    const rows = await WorkService.listRegistrations(req.query);
+    const rows = await WorkService.listRegistrations(scopeOwnQuery(req.query, callerFrom(req)));
     return res.status(200).json({ data: rows, message: "Thao tác thành công" });
   } catch (e) {
     return next(e);
@@ -76,6 +101,13 @@ async function listRegistrations(req, res, next) {
 
 async function deleteRegistration(req, res, next) {
   try {
+    const caller = callerFrom(req);
+    if (!isPrivileged(caller)) {
+      const mine = await WorkService.listRegistrations(scopeOwnQuery({}, caller));
+      if (!mine.some((r) => String(r.id) === String(req.params.id))) {
+        throw new ForbiddenError("Bạn không có quyền xóa đăng ký ca của người khác");
+      }
+    }
     const success = await WorkService.deleteRegistration(req.params.id);
     if (!success) {
       return res.status(404).json({ error: { code: "NOT_FOUND", message: "Bản ghi đăng ký không tồn tại" } });
@@ -88,9 +120,10 @@ async function deleteRegistration(req, res, next) {
 
 async function checkin(req, res, next) {
   try {
-    const errors = validateAttendance(req.body);
+    const body = assertSelfEmployee(req.body, callerFrom(req));
+    const errors = validateAttendance(body);
     if (errors.length) throw new ValidationError(errors.join("; "));
-    const row = await WorkService.checkin(req.body);
+    const row = await WorkService.checkin(body);
     return res.status(201).json({ data: row, message: "Chấm công vào thành công" });
   } catch (e) {
     return next(e);
@@ -99,9 +132,10 @@ async function checkin(req, res, next) {
 
 async function checkout(req, res, next) {
   try {
-    const errors = validateAttendance(req.body);
+    const body = assertSelfEmployee(req.body, callerFrom(req));
+    const errors = validateAttendance(body);
     if (errors.length) throw new ValidationError(errors.join("; "));
-    const row = await WorkService.checkout(req.body);
+    const row = await WorkService.checkout(body);
     return res.status(200).json({ data: row, message: "Chấm công ra thành công" });
   } catch (e) {
     return next(e);
@@ -110,7 +144,7 @@ async function checkout(req, res, next) {
 
 async function listAttendance(req, res, next) {
   try {
-    const rows = await WorkService.listAttendance(req.query);
+    const rows = await WorkService.listAttendance(scopeOwnQuery(req.query, callerFrom(req)));
     return res.status(200).json({ data: rows, message: "Thao tác thành công" });
   } catch (e) {
     return next(e);
@@ -137,7 +171,7 @@ async function updateConfig(req, res, next) {
 
 async function listTasks(req, res, next) {
   try {
-    const rows = await WorkService.listTasks(req.query);
+    const rows = await WorkService.listTasks(scopeTaskQuery(req.query, callerFrom(req)));
     return res.status(200).json({ data: rows, message: "Thao tác thành công" });
   } catch (e) {
     return next(e);
@@ -160,11 +194,25 @@ async function updateTask(req, res, next) {
     const errors = validateTask({ title: "x", ...req.body });
     if (errors.length && !req.body.title) {
       // Cho phép update từng phần, chỉ check status
-      if (req.body.status && !["pending", "in_progress", "done"].includes(req.body.status)) {
+      if (req.body.status && !["pending", "in_progress", "inProgress", "done", "completed", "overdue"].includes(req.body.status)) {
         throw new ValidationError(errors.join("; "));
       }
     } else if (errors.length) throw new ValidationError(errors.join("; "));
-    const row = await WorkService.updateTask(req.params.id, req.body);
+    const caller = callerFrom(req);
+    let payload = req.body;
+    if (!isPrivileged(caller)) {
+      const task = await WorkService.getTaskById(req.params.id);
+      if (!task) throw new NotFoundError("Không tìm thấy tác vụ");
+      if (String(task.assignedTo || "") !== String(caller.userId)) {
+        throw new ForbiddenError("Bạn không có quyền cập nhật tác vụ của người khác");
+      }
+      // Nhân viên chỉ báo cáo tiến độ, không tự giao việc hay đổi hạn.
+      payload = {};
+      for (const field of ["status", "completedAt", "proofPhotoUrl"]) {
+        if (req.body[field] !== undefined) payload[field] = req.body[field];
+      }
+    }
+    const row = await WorkService.updateTask(req.params.id, payload);
     if (!row) throw new NotFoundError("Không tìm thấy tác vụ");
     return res.status(200).json({ data: row, message: "Thao tác thành công" });
   } catch (e) {
@@ -254,6 +302,7 @@ module.exports = {
   deleteShift,
   assignShift,
   registerShift,
+  unregisterShift,
   listRegistrations,
   deleteRegistration,
   getShift,

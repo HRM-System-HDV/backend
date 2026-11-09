@@ -4,6 +4,7 @@ const PayrollService = require("../services/PayrollService");
 const { createPayoutUseCase, generatePayslipUseCase } = PayrollService;
 const { validatePayout, validateGenerate } = require("../validators/payrollValidator");
 const { ValidationError, NotFoundError } = require("../utils/errors");
+const { callerFrom, scopePayslipQuery, assertOwnPayslip } = require("../utils/caller");
 
 async function listBankAccounts(_req, res, next) {
   try {
@@ -69,6 +70,7 @@ async function getPayslip(req, res, next) {
   try {
     const row = await PayrollService.getPayslip(req.params.id);
     if (!row) throw new NotFoundError("Không tìm thấy phiếu lương");
+    assertOwnPayslip(row, callerFrom(req));
     return res.status(200).json({ data: row, message: "Thao tác thành công" });
   } catch (e) {
     return next(e);
@@ -77,7 +79,7 @@ async function getPayslip(req, res, next) {
 
 async function listPayslips(req, res, next) {
   try {
-    const rows = await PayrollService.listPayslips(req.query);
+    const rows = await PayrollService.listPayslips(scopePayslipQuery(req.query, callerFrom(req)));
     return res.status(200).json({ data: rows, message: "Thao tác thành công" });
   } catch (e) {
     return next(e);

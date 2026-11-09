@@ -609,6 +609,11 @@ async function removeDepartment(id) {
 // --- Employees ---
 function applyEmployeeFilter(rows, query = {}) {
   let out = rows;
+  if (query.id) out = out.filter((e) => String(e.id) === String(query.id));
+  if (query.email) {
+    const target = String(query.email).toLowerCase();
+    out = out.filter((e) => String(e.email || "").toLowerCase() === target);
+  }
   if (query.branchSlug) {
     const target = normalizeBranchSlug(query.branchSlug);
     out = out.filter((e) => normalizeBranchSlug(e.branchSlug) === target);
@@ -626,6 +631,8 @@ async function listEmployees(query = {}) {
   if (prisma) {
     try {
       const where = {};
+      if (query.id) where.id = String(query.id);
+      if (query.email) where.email = { equals: String(query.email), mode: "insensitive" };
       if (query.branchSlug) {
         where.branchSlug = { equals: query.branchSlug, mode: "insensitive" };
       }
@@ -659,7 +666,7 @@ async function getEmployee(id) {
 const EMPLOYEE_FIELDS = [
   "name", "email", "phone", "gender", "birthDate", "province", "ward", "street",
   "cccd", "issueDate", "issuePlace", "cccdFront", "cccdBack", "avatar", "branchSlug",
-  "department", "role", "systemRole", "status", "joinDate", "baseSalary",
+  "department", "role", "systemRole", "status", "joinDate", "resignedAt", "baseSalary",
   "salaryType", "hourlySalary", "bankName", "bankAccountNumber", "bankAccountName",
 ];
 
@@ -679,6 +686,17 @@ function sanitizeEmployeePayload(payload = {}) {
     if (key === "cccdFront" || key === "cccdBack" || key === "avatar") {
       if (typeof value === "boolean") continue;
       data[key] = typeof value === "string" && value.trim() ? value.trim() : null;
+      continue;
+    }
+
+    // resignedAt là cột DateTime: nhận ISO string / Date, chuỗi rỗng -> NULL.
+    if (key === "resignedAt") {
+      if (value === "" || value === null) {
+        data[key] = null;
+        continue;
+      }
+      const date = value instanceof Date ? value : new Date(value);
+      data[key] = Number.isNaN(date.getTime()) ? null : date;
       continue;
     }
 
@@ -725,14 +743,17 @@ async function nextCode({ prisma, memoryRows, field, prefix, fallbackRows }) {
 }
 
 // Sinh mã nhân viên gọn: NV-0001 (4 số, tăng dần theo mã lớn nhất hiện có).
-async function nextEmployeeId() {
-  return nextCode({
+async function nextEmployeeId(skip = new Set()) {
+  const base = await nextCode({
     prisma: database.getPrisma(),
     memoryRows: memoryEmployees,
     field: "id",
     prefix: "NV-",
     fallbackRows: "employee",
   });
+  let n = Number(base.slice("NV-".length));
+  while (skip.has(`NV-${String(n).padStart(4, "0")}`)) n += 1;
+  return `NV-${String(n).padStart(4, "0")}`;
 }
 
 // Sinh mã chi nhánh tự động: CN-0001 (dùng làm slug luôn).
@@ -767,17 +788,21 @@ async function createEmployee(payload) {
   const data = sanitizeEmployeePayload(payload);
   const prisma = database.getPrisma();
   if (prisma) {
-    let created;
-    // Tạo tối đa 5 lần: nếu trúng id NV-xxxx trùng (đồng thời), tăng mã và thử lại.
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const empId = await nextEmployeeId();
+    const skip = new Set();
+    let created = null;
+    // Tạo tối đa 5 lần: bỏ qua mã đã tồn tại hoặc đã thuộc tài khoản đăng nhập khác.
+    for (let attempt = 0; attempt < 5 && !created; attempt += 1) {
+      const empId = await nextEmployeeId(skip);
+      let row;
       try {
-        created = await prisma.employee.create({ data: { ...data, id: empId } });
-        break;
+        row = await prisma.employee.create({ data: { ...data, id: empId } });
       } catch (e) {
         if (String(e.code) === "P2002") {
           const target = String(e.meta?.target || "");
-          if (target.includes("id")) continue; // trùng mã -> sinh mã mới
+          if (target.includes("id")) {
+            skip.add(empId);
+            continue;
+          }
           const err = new Error("Email đã tồn tại");
           err.status = 409;
           err.code = "DUPLICATE_RESOURCE";
@@ -785,6 +810,46 @@ async function createEmployee(payload) {
         }
         throw e;
       }
+
+      const sync = await syncEmployeeToIdentity(row, "upsert");
+      // Không chặn nghiệp vụ khi identity tạm mất kết nối; xung đột thì phải xử lý.
+      if (sync.ok || sync.networkError) {
+        created = row;
+        break;
+      }
+
+      // Thu hồi hồ sơ vừa tạo bằng xóa thẳng DB: gọi đồng bộ delete lúc này sẽ
+      // xóa nhầm tài khoản đang trùng mã.
+      await prisma.employee.delete({ where: { id: row.id } }).catch(() => {});
+
+      if (sync.conflict === "EMAIL_EXISTS" && sync.identityId) {
+        // Email đã có tài khoản đăng nhập: dùng đúng mã của tài khoản đó.
+        const canonicalId = String(sync.identityId);
+        const taken = await prisma.employee
+          .findUnique({ where: { id: canonicalId } })
+          .catch(() => null);
+        if (taken) {
+          skip.add(empId);
+          continue;
+        }
+        try {
+          const adopted = await prisma.employee.create({ data: { ...data, id: canonicalId } });
+          const syncAdopted = await syncEmployeeToIdentity(adopted, "upsert");
+          if (syncAdopted.ok || syncAdopted.networkError) {
+            created = adopted;
+            break;
+          }
+          await prisma.employee.delete({ where: { id: adopted.id } }).catch(() => {});
+        } catch (e) {
+          if (String(e.code) === "P2002" && String(e.meta?.target || "").includes("email")) {
+            const err = new Error("Email đã tồn tại");
+            err.status = 409;
+            err.code = "DUPLICATE_RESOURCE";
+            throw err;
+          }
+        }
+      }
+      skip.add(empId);
     }
     // Nếu vòng lặp cạn (5 lần toàn trùng mã) coi như xung đột dữ liệu.
     if (!created) {
@@ -794,7 +859,6 @@ async function createEmployee(payload) {
       throw err;
     }
     await refreshAllStaffCounts();
-    syncEmployeeToIdentity(created, "upsert").catch(() => {});
     return created;
   }
   if (memoryEmployees.some((e) => e.email === data.email)) {
@@ -872,6 +936,8 @@ async function updateEmployee(id, payload) {
 async function removeEmployee(id) {
   const prisma = database.getPrisma();
   if (prisma) {
+    const existing = await prisma.employee.findUnique({ where: { id } }).catch(() => null);
+    if (!existing) return false;
     try {
       await prisma.employee.delete({ where: { id } });
     } catch (e) {
@@ -879,14 +945,15 @@ async function removeEmployee(id) {
       throw e;
     }
     await refreshAllStaffCounts();
-    syncEmployeeToIdentity({ id }, "delete").catch(() => {});
+    // Kèm email để identity chỉ xóa đúng tài khoản khớp cả mã lẫn email.
+    syncEmployeeToIdentity({ id: existing.id, email: existing.email }, "delete").catch(() => {});
     return true;
   }
   const idx = memoryEmployees.findIndex((e) => e.id === id);
   if (idx < 0) return false;
-  memoryEmployees.splice(idx, 1);
+  const [removed] = memoryEmployees.splice(idx, 1);
   await refreshAllStaffCounts();
-  syncEmployeeToIdentity({ id }, "delete").catch(() => {});
+  syncEmployeeToIdentity({ id: removed.id, email: removed.email }, "delete").catch(() => {});
   return true;
 }
 

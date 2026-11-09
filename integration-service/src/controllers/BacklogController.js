@@ -13,7 +13,13 @@ async function listBacklogs(req, res, next) {
 
 async function createBacklog(req, res, next) {
   try {
-    const row = await BacklogService.create(req.body);
+    // Nhật ký phải ghi danh tính gateway đã verify, không tin userName/userRole
+    // client tự gửi — nếu không nhân viên có thể mạo danh admin trong log.
+    const row = await BacklogService.create({
+      ...req.body,
+      userName: req.headers["x-user-email"] || req.body.userName,
+      userRole: req.headers["x-user-role"] || req.body.userRole,
+    });
     return res.status(201).json({ data: row, message: "Ghi nhật ký thành công" });
   } catch (err) {
     return next(err);

@@ -89,10 +89,23 @@ test("bank-accounts + payout idempotent + payslip generate", { timeout: 90000 },
   });
   assert.equal(res.status, 409);
 
-  // Điều chỉnh thưởng/phạt -> netSalary tính lại
-  res = await fetch(`${base}/api/payroll/payslips?employeeId=${uniqueEmpId}&month=10-2026`);
+  // Điều chỉnh thưởng/phạt -> netSalary tính lại.
+  // Dịch vụ tin danh tính do gateway truyền xuống; gọi thẳng phải tự gắn header
+  // như gateway đã verify, nếu không sẽ bị coi là staff vô danh và bị 403.
+  res = await fetch(`${base}/api/payroll/payslips?employeeId=${uniqueEmpId}&month=10-2026`, {
+    headers: { "x-user-id": "test-admin", "x-user-role": "admin" },
+  });
   body = await res.json();
   const slip = body.data[0];
+
+  // Staff không được đọc phiếu lương của người khác, kể cả khi tự đổi query.
+  res = await fetch(`${base}/api/payroll/payslips?employeeId=${uniqueEmpId}&month=10-2026`, {
+    headers: { "x-user-id": "emp-khac", "x-user-role": "staff" },
+  });
+  body = await res.json();
+  assert.equal(res.status, 200);
+  assert.equal(body.data.length, 0);
+
   res = await fetch(`${base}/api/payroll/payslips/${slip.id}`, {
     method: "PUT",
     headers: json,

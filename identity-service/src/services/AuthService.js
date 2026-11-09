@@ -3,8 +3,9 @@
 // AuthService (Flat 3-Tier Mẫu A): gộp UserRepository + DeviceRepository + User entity cũ,
 // gọi trực tiếp Prisma + fallback in-memory. Luồng Route -> Controller -> Service -> Prisma.
 const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 const database = require("../config/database");
-const { UnauthorizedError, ValidationError, NotFoundError } = require("../utils/errors");
+const { UnauthorizedError, ValidationError, ForbiddenError, NotFoundError } = require("../utils/errors");
 const { signAccessToken, signRefreshToken, verifyToken } = require("../utils/jwt");
 
 const ALLOWED_ROLES = ["admin", "manager", "staff"];
@@ -269,7 +270,25 @@ async function changePasswordUseCase({ userId, currentPassword, newPassword }) {
   return { ok: true };
 }
 
+// Hệ thống chưa có kênh gửi email/SMS nên không thể tự đặt lại mật khẩu an toàn.
+// Trả lời giống nhau cho mọi email để không lộ tài khoản nào tồn tại.
 async function forgotPasswordUseCase({ email }) {
+  if (!email || typeof email !== "string" || !email.includes("@")) {
+    throw new ValidationError("Email không hợp lệ");
+  }
+  return {
+    ok: true,
+    contactAdmin: true,
+    message: "Vì lý do bảo mật, vui lòng liên hệ quản trị viên hoặc quản lý để được cấp lại mật khẩu.",
+  };
+}
+
+// Chỉ admin/manager được đặt lại mật khẩu người khác. Mật khẩu tạm sinh ngẫu nhiên,
+// chỉ trả về một lần cho người thao tác để họ chuyển cho nhân viên.
+async function resetPasswordByAdminUseCase({ email, actor }) {
+  if (!actor || !["admin", "manager"].includes(actor.role)) {
+    throw new ForbiddenError("Chỉ quản trị viên hoặc quản lý được đặt lại mật khẩu");
+  }
   if (!email || typeof email !== "string" || !email.includes("@")) {
     throw new ValidationError("Email không hợp lệ");
   }
@@ -277,10 +296,16 @@ async function forgotPasswordUseCase({ email }) {
   if (!row) {
     throw new NotFoundError("Không tìm thấy tài khoản với email này trên hệ thống");
   }
-  // Đặt lại mật khẩu về mặc định 123456
-  const defaultHash = await bcrypt.hash("123456", 10);
-  await updateUserPassword(row.id, defaultHash);
-  return { ok: true, reset: true, defaultPassword: "123456" };
+  // Quản lý không được chiếm tài khoản quản trị viên.
+  if (actor.role === "manager" && row.role === "admin") {
+    throw new ForbiddenError("Quản lý không được đặt lại mật khẩu quản trị viên");
+  }
+  if (actor.userId && row.id === actor.userId) {
+    throw new ValidationError("Hãy dùng đổi mật khẩu để thay đổi mật khẩu của chính mình");
+  }
+  const tempPassword = crypto.randomBytes(9).toString("base64url");
+  await updateUserPassword(row.id, await bcrypt.hash(tempPassword, 10));
+  return { ok: true, email: row.email, tempPassword };
 }
 
 async function refreshTokenUseCase({ refreshToken }) {
@@ -323,21 +348,18 @@ async function syncEmployeeUseCase({ employee, action = "upsert" }) {
   const prisma = database.getPrisma();
 
   if (action === "delete") {
-    if (prisma) {
-      await prisma.user
-        .deleteMany({
-          where: {
-            OR: [
-              employee.id ? { id: employee.id } : undefined,
-              employee.email ? { email: employee.email } : undefined,
-            ].filter(Boolean),
-          },
-        })
-        .catch(() => {});
+    // Mã nhân sự ở organization và users.id là hai không gian sinh mã độc lập,
+    // nên chỉ xóa khi khớp cả mã lẫn email (nếu có) để không xóa nhầm tài khoản
+    // của người khác đang trùng mã.
+    const email = (employee.email || "").trim().toLowerCase();
+    const where = employee.id ? { id: employee.id, ...(email ? { email } : {}) } : null;
+    if (prisma && where) {
+      await prisma.user.deleteMany({ where }).catch(() => {});
     }
-    const idx = memoryUsers.findIndex(
-      (u) => (employee.id && u.id === employee.id) || (employee.email && u.email === employee.email)
-    );
+    const idx = memoryUsers.findIndex((u) => {
+      if (!employee.id || u.id !== employee.id) return false;
+      return email ? String(u.email || "").toLowerCase() === email : true;
+    });
     if (idx >= 0) memoryUsers.splice(idx, 1);
     return { ok: true, action: "delete" };
   }
@@ -359,18 +381,24 @@ async function syncEmployeeUseCase({ employee, action = "upsert" }) {
   const branchSlug = employee.branchSlug ? employee.branchSlug.toUpperCase() : null;
 
   if (prisma) {
-    const existing = await prisma.user.findFirst({
-      where: {
-        OR: [
-          employee.id ? { id: employee.id } : undefined,
-          { email },
-        ].filter(Boolean),
-      },
-    });
+    const byId = employee.id
+      ? await prisma.user.findUnique({ where: { id: employee.id } })
+      : null;
+    const byEmail = await prisma.user.findUnique({ where: { email } });
 
-    if (existing) {
+    // Không được "cướp" tài khoản: mã đã thuộc người khác thì báo xung đột để
+    // organization đổi mã nhân sự, thay vì đổi email/mật khẩu của tài khoản đó.
+    if (byId && String(byId.email).toLowerCase() !== email) {
+      return { ok: false, code: "ID_CONFLICT", identityId: byId.id, email: byId.email };
+    }
+    // Email đã có tài khoản với mã khác: organization nên dùng lại đúng mã đó.
+    if (byEmail && (!byId || byEmail.id !== byId.id)) {
+      return { ok: false, code: "EMAIL_EXISTS", identityId: byEmail.id, email: byEmail.email };
+    }
+
+    if (byId) {
       const updated = await prisma.user.update({
-        where: { id: existing.id },
+        where: { id: byId.id },
         data: {
           email,
           name,
@@ -389,16 +417,25 @@ async function syncEmployeeUseCase({ employee, action = "upsert" }) {
           role,
           roleTitle,
           branchSlug,
-          passwordHash: bcrypt.hashSync("123456", 10),
+          // Không đặt mật khẩu mặc định: ai biết email cũng đăng nhập được.
+          // Quản trị viên cấp mật khẩu tạm qua POST /api/auth/reset-password.
+          passwordHash: bcrypt.hashSync(crypto.randomBytes(24).toString("base64url"), 10),
         },
       });
       return { ok: true, action: "created", user: toSafeUser(created) };
     }
   } else {
-    const idx = memoryUsers.findIndex(
-      (u) => (employee.id && u.id === employee.id) || u.email === email
-    );
-    if (idx >= 0) {
+    const byId = employee.id ? memoryUsers.find((u) => u.id === employee.id) : null;
+    const byEmail = memoryUsers.find((u) => u.email === email);
+    if (byId && String(byId.email || "").toLowerCase() !== email) {
+      return { ok: false, code: "ID_CONFLICT", identityId: byId.id, email: byId.email };
+    }
+    if (byEmail && (!byId || byEmail.id !== byId.id)) {
+      return { ok: false, code: "EMAIL_EXISTS", identityId: byEmail.id, email: byEmail.email };
+    }
+    const existing = byId || byEmail;
+    if (existing) {
+      const idx = memoryUsers.indexOf(existing);
       memoryUsers[idx] = {
         ...memoryUsers[idx],
         email,
@@ -416,7 +453,7 @@ async function syncEmployeeUseCase({ employee, action = "upsert" }) {
         role,
         roleTitle,
         branchSlug,
-        passwordHash: bcrypt.hashSync("123456", 10),
+        passwordHash: bcrypt.hashSync(crypto.randomBytes(24).toString("base64url"), 10),
       };
       memoryUsers.push(newUser);
       return { ok: true, action: "created", user: toSafeUser(newUser) };
@@ -432,6 +469,7 @@ module.exports = {
   getMeUseCase,
   changePasswordUseCase,
   forgotPasswordUseCase,
+  resetPasswordByAdminUseCase,
   refreshTokenUseCase,
   getDevicesUseCase,
   revokeDeviceUseCase,
