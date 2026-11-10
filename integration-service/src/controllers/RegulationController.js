@@ -1,27 +1,12 @@
 "use strict";
 
+const { toVnDate, todayVn } = require("../utils/dateFormat");
+
+// Ngày hiệu lực/hết hạn luôn DD/MM/YYYY; không truyền thì lấy hôm nay.
 function formatDateVN(dateInput) {
-  if (!dateInput) {
-    const now = new Date();
-    const d = String(now.getDate()).padStart(2, "0");
-    const m = String(now.getMonth() + 1).padStart(2, "0");
-    const y = now.getFullYear();
-    return `${d}/${m}/${y}`;
-  }
-  const str = String(dateInput).trim();
-  const slashMatch = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (slashMatch) {
-    return `${slashMatch[1].padStart(2, "0")}/${slashMatch[2].padStart(2, "0")}/${slashMatch[3]}`;
-  }
-  const hyphenMatch = str.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
-  if (hyphenMatch) {
-    return `${hyphenMatch[1].padStart(2, "0")}/${hyphenMatch[2].padStart(2, "0")}/${hyphenMatch[3]}`;
-  }
-  const isoMatch = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
-  if (isoMatch) {
-    return `${isoMatch[3].padStart(2, "0")}/${isoMatch[2].padStart(2, "0")}/${isoMatch[1]}`;
-  }
-  return str;
+  if (!dateInput) return todayVn();
+  const normalized = toVnDate(dateInput);
+  return normalized || String(dateInput).trim();
 }
 
 
@@ -75,7 +60,7 @@ async function createRegulation(req, res, next) {
       status: req.body.status || "hiệu lực",
       scope: req.body.scope || "Toàn công ty",
       effectiveDate: formatDateVN(req.body.effectiveDate),
-      expiryDate: req.body.expiryDate || null,
+      expiryDate: req.body.expiryDate ? formatDateVN(req.body.expiryDate) : null,
       version: req.body.version || "1.0",
       pinned: Boolean(req.body.pinned),
       attachments: typeof req.body.attachments === "number" ? req.body.attachments : 0,
@@ -102,6 +87,10 @@ async function updateRegulation(req, res, next) {
 
     const payload = { ...req.body };
     delete payload.author;
+    if (payload.effectiveDate !== undefined) payload.effectiveDate = formatDateVN(payload.effectiveDate);
+    if (payload.expiryDate !== undefined) {
+      payload.expiryDate = payload.expiryDate ? formatDateVN(payload.expiryDate) : null;
+    }
     const updated = await RegulationService.update(id, payload);
     return res.status(200).json({
       data: updated,

@@ -3,6 +3,24 @@
 const NotificationService = require("../services/NotificationService");
 const { validateCreateNotification } = require("../validators/notificationValidator");
 const errorCodes = require("../utils/errors");
+const { toVnDate } = require("../utils/dateFormat");
+
+function normalizeShiftDate(value) {
+  if (!value) return null;
+  return toVnDate(value) || String(value).trim();
+}
+
+// metadata là JSON tự do nhưng các khóa ngày ca vẫn phải đúng chuẩn DD/MM/YYYY.
+function normalizeMetadata(metadata) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return metadata || null;
+  const next = { ...metadata };
+  for (const key of ["shiftDate", "swapShiftDate"]) {
+    if (typeof next[key] === "string" && next[key].trim()) {
+      next[key] = normalizeShiftDate(next[key]);
+    }
+  }
+  return next;
+}
 
 // Nhân viên chỉ được xem phạm vi của chính mình, kể cả khi client gửi employeeId
 // của người khác. Quản lý/admin giữ quyền xem theo chi nhánh.
@@ -60,10 +78,10 @@ async function createNotification(req, res, next) {
       branchSlug: req.body.branchSlug,
       title: req.body.title.trim(),
       body: req.body.body.trim(),
-      metadata: req.body.metadata || null,
+      metadata: normalizeMetadata(req.body.metadata),
       requestType: req.body.requestType || null,
       shiftName: req.body.shiftName || null,
-      shiftDate: req.body.shiftDate || null,
+      shiftDate: normalizeShiftDate(req.body.shiftDate),
       shiftTime: req.body.shiftTime || null,
       shiftHours: req.body.shiftHours || null,
       senderName: req.body.senderName || null,

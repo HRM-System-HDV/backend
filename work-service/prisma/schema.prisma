@@ -19,7 +19,7 @@ model Shift {
   scheduledEnd   String?
   checkIn        String?
   checkOut       String?
-  status         String   @default("đang làm")
+  status         String   @default("Chưa chấm công")
   note           String?
   isRecurring    Boolean  @default(false)
   createdAt      DateTime @default(now())
@@ -108,4 +108,35 @@ model Task {
   updatedAt        DateTime @updatedAt
 
   @@map("tasks")
+}
+
+// Kho lưu trữ nhiệm vụ cũ — mirror trường Task, giữ id gốc để khôi phục.
+// Ảnh minh chứng của nhiệm vụ archive không bị xóa.
+model ArchivedTask {
+  id               String   @id // id gốc của Task
+  title            String
+  description      String?
+  assignedTo       String?
+  branchSlug       String?
+  dueDate          String?
+  status           String
+  sourceType       String?
+  assignedByName   String?
+  shiftName        String?
+  priority         String?
+  assignedToEmail  String?
+  assignedToName   String?
+  completedAt      String?
+  requirePhoto     Boolean?
+  proofPhotoUrl    String?
+  photoSubmittedBy String?
+  photoSubmittedAt String?
+  createdAt        DateTime
+  updatedAt        DateTime
+  archivedAt       DateTime @default(now())
+  archiveBatchId   String
+
+  @@index([archivedAt])
+  @@index([createdAt])
+  @@map("archived_tasks")
 }

@@ -5,9 +5,11 @@
 const database = require("../config/database");
 const { NotFoundError } = require("../utils/errors");
 const { syncEmployeeToIdentity } = require("../clients/IdentityClient");
+const { deleteFileByUrl } = require("../clients/IntegrationClient");
+const { toVnDate } = require("../utils/dateFormat");
 
 const seedEmployees = [
-  { id: "NV-0001", name: "Trần Minh Tuấn", email: "admin@company.com", branchSlug: null, department: null, role: "Quản trị viên", systemRole: "admin", status: "đang làm", joinDate: "01-01-2024", baseSalary: 20000000, salaryType: "monthly" },
+  { id: "NV-0001", name: "Trần Minh Tuấn", email: "admin@company.com", branchSlug: null, department: null, role: "Quản trị viên", systemRole: "admin", status: "đang làm", joinDate: "01/01/2024", baseSalary: 20000000, salaryType: "monthly" },
 ];
 let memoryBranches = [];
 let memoryDepartments = [];
@@ -715,6 +717,10 @@ function sanitizeEmployeePayload(payload = {}) {
     // Chuỗi rỗng ở khóa ngoại/không bắt buộc lưu thành NULL cho sạch dữ liệu.
     if (typeof value === "string") value = value.trim();
     if (key === "branchSlug" && typeof value === "string") value = normalizeBranchSlug(value);
+    // Ngày trong hồ sơ luôn lưu DD/MM/YYYY, kể cả khi client gửi ISO (input type=date).
+    if (["birthDate", "issueDate", "joinDate"].includes(key) && typeof value === "string" && value !== "") {
+      value = toVnDate(value) || value;
+    }
     if (["branchSlug", "department"].includes(key) && value === "") value = null;
     data[key] = value;
   }
@@ -947,6 +953,7 @@ async function removeEmployee(id) {
     await refreshAllStaffCounts();
     // Kèm email để identity chỉ xóa đúng tài khoản khớp cả mã lẫn email.
     syncEmployeeToIdentity({ id: existing.id, email: existing.email }, "delete").catch(() => {});
+    cleanupEmployeeFiles(existing);
     return true;
   }
   const idx = memoryEmployees.findIndex((e) => e.id === id);
@@ -954,7 +961,18 @@ async function removeEmployee(id) {
   const [removed] = memoryEmployees.splice(idx, 1);
   await refreshAllStaffCounts();
   syncEmployeeToIdentity({ id: removed.id, email: removed.email }, "delete").catch(() => {});
+  cleanupEmployeeFiles(removed);
   return true;
+}
+
+// Xóa avatar/CCCD best-effort qua integration-service; không chặn nghiệp vụ xóa nhân sự.
+function cleanupEmployeeFiles(employee) {
+  const urls = [employee.avatar, employee.cccdFront, employee.cccdBack].filter(Boolean);
+  for (const url of urls) {
+    deleteFileByUrl(url).catch((e) => {
+      console.warn("[organization-service] Xóa ảnh nhân sự thất bại:", e.message);
+    });
+  }
 }
 
 module.exports = {

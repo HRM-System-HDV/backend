@@ -85,6 +85,9 @@ app.use(proxyTo("/api/notifications", config.targets.integration, "integration-s
 app.use(proxyTo("/api/soap-config", config.targets.integration, "integration-service"));
 app.use(proxyTo("/api/upload", config.targets.integration, "integration-service"));
 app.use(proxyTo("/api/backlog", config.targets.integration, "integration-service"));
+app.use(proxyTo("/api/files", config.targets.integration, "integration-service"));
+app.use(proxyTo("/api/archive/work", config.targets.work, "work-service"));
+app.use(proxyTo("/api/archive/integration", config.targets.integration, "integration-service"));
 
 app.use((_req, res) => {
   res.status(404).json({ error: { code: "NOT_FOUND", message: "Không tìm thấy tài nguyên" } });

@@ -2,6 +2,8 @@
 
 require("dotenv").config();
 
+const path = require("node:path");
+
 module.exports = {
   port: parseInt(process.env.PORT, 10) || 4005,
   serviceName: process.env.SERVICE_NAME || "integration-service",
@@ -11,10 +13,7 @@ module.exports = {
   timeoutMs: 5000,
   payrollServiceUrl: process.env.PAYROLL_SERVICE_URL || "http://localhost:4004",
   workServiceUrl: process.env.WORK_SERVICE_URL || "http://localhost:4003",
-  cloudinary: {
-    cloudName: process.env.CLOUDINARY_CLOUD_NAME || "dqpqiplhv",
-    apiKey: process.env.CLOUDINARY_API_KEY || "896337341977173",
-    apiSecret: process.env.CLOUDINARY_API_SECRET || "7JAqSBiIvBAHPjUba6JKl80AmaM",
-    fallbackSecret: "00IYdtnGKF62uQ9ky35X07TJ2ZI",
-  },
+  storageDir: path.resolve(process.env.STORAGE_DIR || "./storage"),
+  publicBaseUrl: (process.env.PUBLIC_BASE_URL || "http://localhost:4000").replace(/\/+$/, ""),
+  maxUploadBytes: parseInt(process.env.MAX_UPLOAD_BYTES, 10) || 10 * 1024 * 1024,
 };
