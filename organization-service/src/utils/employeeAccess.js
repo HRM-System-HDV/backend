@@ -67,11 +67,24 @@ const SELF_EDITABLE_FIELDS = [
   "bankName", "bankAccountNumber", "bankAccountName",
 ];
 
+// Nhóm field chỉ admin được thay đổi: vai trò hệ thống, chi nhánh, email đăng nhập
+// và lương. Gateway chỉ chặn theo vai trò chứ không theo từng field, nên service phải
+// lọc chúng ở mọi payload sửa hồ sơ thường để chặn leo quyền / đổi lương trái phép.
+const PRIVILEGED_WRITE_FIELDS = ["systemRole", "branchSlug", "email", "baseSalary"];
+
+function omitPrivilegedFields(body) {
+  const out = { ...body };
+  for (const field of PRIVILEGED_WRITE_FIELDS) delete out[field];
+  return out;
+}
+
 function assertCanWriteEmployee(row, caller, body) {
   if (caller.role === "admin") return body;
   if (caller.role === "manager") {
-    if (isSelf(row, caller)) return body;
-    if (caller.branchSlug && row.branchSlug === caller.branchSlug) return body;
+    // Manager chỉ sửa thông tin nhân sự, không được tự nâng quyền/chuyển chi nhánh/
+    // đổi email/chỉnh lương kể cả khi sửa hồ sơ của chính mình.
+    if (isSelf(row, caller)) return omitPrivilegedFields(body);
+    if (caller.branchSlug && row.branchSlug === caller.branchSlug) return omitPrivilegedFields(body);
     throw new ForbiddenError("Quản lý chỉ sửa được hồ sơ thuộc chi nhánh của mình");
   }
   if (!isSelf(row, caller)) {
@@ -88,6 +101,38 @@ function assertCanWriteEmployee(row, caller, body) {
   return filtered;
 }
 
+// Tạo hồ sơ mới là đường leo quyền còn lại: gateway chỉ chặn theo vai trò
+// (manager ghi được /api/employees) nên service phải chặn manager tự dựng tài
+// khoản admin hoặc dựng nhân sự chen vào chi nhánh khác.
+function assertCanCreateEmployee(caller, body) {
+  if (caller.role === "admin") return body;
+  if (caller.role !== "manager") {
+    throw new ForbiddenError("Bạn không có quyền tạo hồ sơ nhân sự");
+  }
+  const requestedRole = body.systemRole || "staff";
+  if (requestedRole !== "staff") {
+    throw new ForbiddenError("Quản lý chỉ tạo được hồ sơ nhân viên, không tạo được quản lý hoặc quản trị viên");
+  }
+  if (!caller.branchSlug) {
+    throw new ForbiddenError("Tài khoản quản lý chưa được gán chi nhánh");
+  }
+  return { ...body, systemRole: "staff", branchSlug: caller.branchSlug };
+}
+
+// Xóa hồ sơ là quyền nhạy cảm mà gateway không phân theo từng bản ghi: manager chỉ// xóa được người cùng chi nhánh, và manager/staff không được xóa tài khoản admin để
+// chặn gỡ bỏ người ở trên quyền hoặc xóa chéo chi nhánh.
+function assertCanDeleteEmployee(row, caller) {
+  if (!row) return;
+  if (caller.role === "admin") return;
+  if (row.systemRole === "admin") {
+    throw new ForbiddenError("Bạn không có quyền xóa tài khoản của quản trị viên");
+  }
+  if (caller.role === "manager") {
+    if (caller.branchSlug && row.branchSlug === caller.branchSlug) return;
+    throw new ForbiddenError("Quản lý chỉ xóa được hồ sơ thuộc chi nhánh của mình");
+  }
+}
+
 module.exports = {
   callerFrom,
   isSelf,
@@ -95,4 +140,6 @@ module.exports = {
   scopeEmployeeQuery,
   assertCanReadEmployee,
   assertCanWriteEmployee,
+  assertCanCreateEmployee,
+  assertCanDeleteEmployee,
 };

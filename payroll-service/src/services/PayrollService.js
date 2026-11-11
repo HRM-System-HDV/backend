@@ -27,16 +27,13 @@ async function nextPayslipId() {
     if (Number.isInteger(n) && n > max) max = n;
   };
   const prisma = database.getPrisma();
+  // Có prisma thì quét id lỗi phải nổ ra: nuốt lỗi sẽ sinh PL-0001 trùng phiếu đã có.
   if (prisma) {
-    try {
-      const rows = await prisma.payslip.findMany({
-        where: { id: { startsWith: prefix } },
-        select: { id: true },
-      });
-      rows.forEach((r) => scan(r.id));
-    } catch (err) {
-      console.error("[payroll-service] Lỗi prisma.payslip.nextId:", err);
-    }
+    const rows = await prisma.payslip.findMany({
+      where: { id: { startsWith: prefix } },
+      select: { id: true },
+    });
+    rows.forEach((r) => scan(r.id));
   } else {
     memoryPayslips.forEach((p) => scan(p.id));
   }
@@ -60,12 +57,10 @@ async function ensureSeeded() {
 // --- Bank accounts ---
 async function listBankAccounts() {
   const prisma = database.getPrisma();
+  // Có prisma mà query lỗi thì phải để lỗi bật ra ngoài (controller trả 5xx):
+  // nuốt lỗi rồi trả kho in-memory sẽ khiến caller thấy "ngân hàng trống" giả.
   if (prisma) {
-    try {
-      return await prisma.bankAccount.findMany({ orderBy: { accountNumber: "asc" } });
-    } catch (err) {
-      console.error("[payroll-service] Lỗi prisma.bankAccount.findMany:", err);
-    }
+    return await prisma.bankAccount.findMany({ orderBy: { accountNumber: "asc" } });
   }
   return memoryAccounts;
 }
@@ -84,7 +79,10 @@ async function updateBankAccount(id, payload) {
       }
       return await prisma.bankAccount.update({ where: { id }, data: allowed });
     } catch (err) {
+      // accountNumber không nằm trong allowlist nên P2002 ở đây chỉ có nghĩa là thiếu bản ghi.
+      if (String(err.code) === "P2002") return null;
       console.error("[payroll-service] Lỗi prisma.bankAccount.update:", err);
+      throw err;
     }
   }
   const idx = memoryAccounts.findIndex((a) => a.id === id);
@@ -97,18 +95,38 @@ async function updateBankAccount(id, payload) {
 }
 
 async function createBankAccount(payload) {
+  // Allowlist giống updateBankAccount, thêm accountNumber vì đây là bắt buộc khi tạo.
+  const allowed = {};
+  for (const k of [
+    "accountNumber",
+    "accountName",
+    "bankName",
+    "branch",
+    "status",
+    "balance",
+    "isPrimary",
+  ]) {
+    if (payload[k] !== undefined) allowed[k] = payload[k];
+  }
   const prisma = database.getPrisma();
   if (prisma) {
     try {
-      if (payload.isPrimary === true) {
+      if (allowed.isPrimary === true) {
         await prisma.bankAccount.updateMany({ where: {}, data: { isPrimary: false } });
       }
-      return await prisma.bankAccount.create({ data: payload });
+      return await prisma.bankAccount.create({ data: allowed });
     } catch (err) {
+      if (String(err.code) === "P2002") {
+        const dup = new Error("Số tài khoản ngân hàng đã tồn tại");
+        dup.status = 409;
+        dup.code = "DUPLICATE_RESOURCE";
+        throw dup;
+      }
       console.error("[payroll-service] Lỗi prisma.bankAccount.create:", err);
+      throw err;
     }
   }
-  const row = { id: uid("bank"), status: "hoạt động", ...payload };
+  const row = { id: uid("bank"), status: "hoạt động", ...allowed };
   if (row.isPrimary === true) {
     memoryAccounts = memoryAccounts.map((a) => ({ ...a, isPrimary: false }));
   }
@@ -123,7 +141,10 @@ async function deleteBankAccount(id) {
       await prisma.bankAccount.delete({ where: { id } });
       return true;
     } catch (err) {
+      // P2025 = không có bản ghi để xoá -> controller trả 404.
+      if (String(err.code) === "P2025") return false;
       console.error("[payroll-service] Lỗi prisma.bankAccount.delete:", err);
+      throw err;
     }
   }
   const idx = memoryAccounts.findIndex((a) => a.id === id);
@@ -134,33 +155,31 @@ async function deleteBankAccount(id) {
 
 async function findAccount(accountNumber) {
   const prisma = database.getPrisma();
+  // Chỉ dùng memory khi thật sự không có prisma (chế độ memory).
+  // Nếu có prisma, mọi lỗi đọc phải nổ ra để không trả về tài khoản ma.
   if (prisma) {
-    try {
-      const row = await prisma.bankAccount.findUnique({ where: { accountNumber } });
-      if (row) return row;
-    } catch (err) {
-      console.error("[payroll-service] Lỗi prisma.bankAccount.findUnique:", err);
-    }
+    return await prisma.bankAccount.findUnique({ where: { accountNumber } });
   }
   return memoryAccounts.find((a) => a.accountNumber === accountNumber) || null;
 }
 
+// Có prisma thì lỗi đọc/cập nhật phải abort: debit nhầm memory sẽ báo lệnh chi
+// thành công trong khi số dư thật trên sổ cái không hề giảm.
 async function debitAccount(accountNumber, amount) {
   const prisma = database.getPrisma();
   if (prisma) {
-    try {
-      const acc = await prisma.bankAccount.findUnique({ where: { accountNumber } });
-      if (acc) {
-        if (acc.balance < amount) throw new InsufficientFundsError("Số dư không đủ");
-        return await prisma.bankAccount.update({
-          where: { accountNumber },
-          data: { balance: acc.balance - amount },
-        });
-      }
-    } catch (e) {
-      if (e.code === "INSUFFICIENT_FUNDS") throw e;
-      console.error("[payroll-service] Lỗi prisma.bankAccount.debitAccount:", e);
+    const acc = await prisma.bankAccount.findUnique({ where: { accountNumber } });
+    if (!acc) {
+      const err = new Error("Không tìm thấy tài khoản công ty");
+      err.status = 404;
+      err.code = "NOT_FOUND";
+      throw err;
     }
+    if (acc.balance < amount) throw new InsufficientFundsError("Số dư không đủ");
+    return await prisma.bankAccount.update({
+      where: { accountNumber },
+      data: { balance: acc.balance - amount },
+    });
   }
   const acc = memoryAccounts.find((a) => a.accountNumber === accountNumber);
   if (!acc) {
@@ -177,25 +196,19 @@ async function debitAccount(accountNumber, amount) {
 // --- Payouts (idempotent) ---
 async function listPayouts() {
   const prisma = database.getPrisma();
+  // Có prisma mà lỗi đọc thì để lỗi bật ra ngoài, không trả kho memory giả.
   if (prisma) {
-    try {
-      return await prisma.payout.findMany({ orderBy: { createdAt: "desc" } });
-    } catch (err) {
-      console.error("[payroll-service] Lỗi prisma.payout.findMany:", err);
-    }
+    return await prisma.payout.findMany({ orderBy: { createdAt: "desc" } });
   }
   return [...memoryPayouts].reverse();
 }
 
 async function findByIdempotencyKey(key) {
   const prisma = database.getPrisma();
+  // Có prisma thì DB là chuẩn duy nhất: lỗi tra key phải nổ (fail-closed) để
+  // createPayout không mạo ghi lệnh chi trùng khi chưa kiểm được key cũ.
   if (prisma) {
-    try {
-      const row = await prisma.payout.findUnique({ where: { idempotencyKey: key } });
-      if (row) return row;
-    } catch (err) {
-      console.error("[payroll-service] Lỗi prisma.payout.findByIdempotencyKey:", err);
-    }
+    return await prisma.payout.findUnique({ where: { idempotencyKey: key } });
   }
   return memoryPayouts.find((p) => p.idempotencyKey === key) || null;
 }
@@ -209,10 +222,13 @@ async function nextPayoutId() {
     const n = Number(s.slice(3));
     if (Number.isInteger(n) && n > max) max = n;
   };
+  // Bỏ .catch nuốt lỗi: quét id mà hỏng thì max ở 0, sinh GD-0001 trùng ->
+  // createPayout dính P2002 và trả lệnh chi cũ. Thả lỗi để abort giao dịch.
   if (prisma) {
-    const rows = await prisma.payout
-      .findMany({ where: { id: { startsWith: "GD-" } }, select: { id: true } })
-      .catch(() => []);
+    const rows = await prisma.payout.findMany({
+      where: { id: { startsWith: "GD-" } },
+      select: { id: true },
+    });
     rows.forEach((r) => scan(r.id));
   } else {
     memoryPayouts.forEach((r) => scan(r.id));
@@ -270,6 +286,8 @@ async function createPayout({ idempotencyKey, debitAccount: debitAcc, content, t
     }
   }
 
+  // debitAccount bắt buộc chạy trước: nếu trừ tiền thất bại thì lệnh chi
+  // không được ghi vào store, tránh "payout thành công" mà số dư không giảm.
   await debitAccount(debitAcc, totalAmount);
   const row = {
     id: await nextPayoutId(),
@@ -299,15 +317,12 @@ async function createPayoutUseCase(payload) {
 // --- Payslips ---
 async function listPayslips(query = {}) {
   const prisma = database.getPrisma();
+  // Có prisma mà lỗi đọc thì nổ ra ngoài, không trả danh sách phiếu memory.
   if (prisma) {
-    try {
-      const where = {};
-      if (query.employeeId) where.employeeId = query.employeeId;
-      if (query.month) where.month = query.month;
-      return await prisma.payslip.findMany({ where, orderBy: { issuedAt: "desc" } });
-    } catch (err) {
-      console.error("[payroll-service] Lỗi prisma.payslip.findMany:", err);
-    }
+    const where = {};
+    if (query.employeeId) where.employeeId = query.employeeId;
+    if (query.month) where.month = query.month;
+    return await prisma.payslip.findMany({ where, orderBy: { issuedAt: "desc" } });
   }
   return memoryPayslips.filter((p) => {
     if (query.employeeId && p.employeeId !== query.employeeId) return false;
@@ -318,28 +333,20 @@ async function listPayslips(query = {}) {
 
 async function findPayslip(id) {
   const prisma = database.getPrisma();
+  // Có prisma thì trả kết quả DB thẳng (kể cả null); lỗi đọc phải nổ ra ngoài.
   if (prisma) {
-    try {
-      const row = await prisma.payslip.findUnique({ where: { id } });
-      if (row) return row;
-    } catch (err) {
-      console.error("[payroll-service] Lỗi prisma.payslip.findUnique:", err);
-    }
+    return await prisma.payslip.findUnique({ where: { id } });
   }
   return memoryPayslips.find((p) => p.id === id) || null;
 }
 
 async function findPayslipByEmployeeMonth(employeeId, month) {
   const prisma = database.getPrisma();
+  // Có prisma thì lỗi đọc phải nổ để generatePayslip không mạo tạo phiếu trùng tháng.
   if (prisma) {
-    try {
-      const row = await prisma.payslip.findUnique({
-        where: { employeeId_month: { employeeId, month } },
-      });
-      if (row) return row;
-    } catch (err) {
-      console.error("[payroll-service] Lỗi prisma.payslip.findByEmployeeMonth:", err);
-    }
+    return await prisma.payslip.findUnique({
+      where: { employeeId_month: { employeeId, month } },
+    });
   }
   return memoryPayslips.find((p) => p.employeeId === employeeId && p.month === month) || null;
 }
@@ -425,6 +432,18 @@ async function updatePayslip(id, payload) {
   for (const k of ["bonus", "totalPenalty", "baseSalary", "payoutId"]) {
     if (payload[k] !== undefined) allowed[k] = payload[k];
   }
+  // Phiếu đã chốt là chứng từ đã bàn giao nên cấm sửa các trường tiền.
+  // payoutId vẫn ghi được vì đó là liên kết lệnh chi của luồng chi lương, không phải số lương.
+  if (["baseSalary", "bonus", "totalPenalty"].some((k) => allowed[k] !== undefined)) {
+    const current = await findPayslip(id);
+    if (!current) return null;
+    if (current.status === "đã chốt") {
+      const err = new Error("Phiếu lương đã chốt, không thể thay đổi");
+      err.status = 409;
+      err.code = "PAYSIP_LOCKED";
+      throw err;
+    }
+  }
   const prisma = database.getPrisma();
   const applyNet = (row) => {
     const base = allowed.baseSalary !== undefined ? allowed.baseSalary : row.baseSalary;
@@ -432,6 +451,8 @@ async function updatePayslip(id, payload) {
     const pen = allowed.totalPenalty !== undefined ? allowed.totalPenalty : row.totalPenalty;
     return { ...row, ...allowed, netSalary: base + bonus - pen };
   };
+  // Có prisma thì ghi lỗi phải abort: nuốt lỗi rồi sửa mảng memory sẽ báo "đã sửa"
+  // trong khi phiếu lương thật trên DB không hề đổi.
   if (prisma) {
     try {
       const current = await prisma.payslip.findUnique({ where: { id } });
@@ -446,6 +467,7 @@ async function updatePayslip(id, payload) {
       });
     } catch (err) {
       console.error("[payroll-service] Lỗi prisma.payslip.update:", err);
+      throw err;
     }
   }
   const idx = memoryPayslips.findIndex((p) => p.id === id);
@@ -461,12 +483,26 @@ async function setPayslipStatus(id, status) {
     err.code = "VALIDATION_ERROR";
     throw err;
   }
+  // Không cho hạ phiếu từ "đã chốt" về "chưa chốt": dịch vụ này không có nghiệp vụ reopen.
+  if (status === "chưa chốt") {
+    const current = await findPayslip(id);
+    if (current && current.status === "đã chốt") {
+      const err = new Error("Phiếu lương đã chốt, không thể mở lại");
+      err.status = 409;
+      err.code = "PAYSIP_LOCKED";
+      throw err;
+    }
+  }
   const prisma = database.getPrisma();
+  // Ghi status lỗi phải abort, không sửa mảng memory: tránh báo "đã chốt" giả.
+  // P2025 (không có phiếu) vẫn trả null để controller báo 404 như trước.
   if (prisma) {
     try {
       return await prisma.payslip.update({ where: { id }, data: { status } });
     } catch (err) {
+      if (String(err.code) === "P2025") return null;
       console.error("[payroll-service] Lỗi prisma.payslip.setStatus:", err);
+      throw err;
     }
   }
   const idx = memoryPayslips.findIndex((p) => p.id === id);
@@ -479,12 +515,15 @@ module.exports = {
   ensureSeeded,
   listBankAccounts,
   findAccount,
+  debitAccount,
   updateBankAccount,
   createBankAccount,
   deleteBankAccount,
   getPayslip: findPayslip,
   listPayouts,
   findByIdempotencyKey,
+  nextPayslipId,
+  nextPayoutId,
   createPayout,
   createPayoutUseCase,
   listPayslips,

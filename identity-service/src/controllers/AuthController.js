@@ -21,12 +21,29 @@ const { ValidationError } = require("../utils/errors");
 const { COOKIE_NAME } = require("../middlewares/session");
 const config = require("../config");
 
-function cookieOptions() {
+// Cookie refresh đi kèm: web không cất token trong JS, nên hết access token phải
+// đổi được token mới bằng cookie (httpOnly) thay vì bắt người dùng đăng nhập lại.
+const REFRESH_COOKIE_NAME = "hrm-refresh";
+
+// jsonwebtoken chấp nhận "15m", "7d", "3600"... -> số ms cho cookie maxAge.
+function ttlToMs(value, fallbackMs) {
+  const match = /^(\d+)\s*(ms|s|m|h|d)?$/i.exec(String(value || "").trim());
+  if (!match) return fallbackMs;
+  const unitMs = { ms: 1, s: 1000, m: 60000, h: 3600000, d: 86400000 }[
+    (match[2] || "s").toLowerCase()
+  ];
+  return Number(match[1]) * unitMs;
+}
+
+const ACCESS_COOKIE_MAX_AGE_MS = ttlToMs(config.jwtExpiresIn, 15 * 60 * 1000);
+const REFRESH_COOKIE_MAX_AGE_MS = ttlToMs(config.jwtRefreshExpiresIn, 7 * 24 * 60 * 60 * 1000);
+
+function cookieOptions(maxAge) {
   return {
     httpOnly: true,
     sameSite: "lax",
     path: "/",
-    maxAge: 7 * 24 * 60 * 60 * 1000,
+    maxAge,
     secure: config.nodeEnv === "production",
   };
 }
@@ -36,7 +53,8 @@ async function login(req, res, next) {
     const errors = validateLogin(req.body);
     if (errors.length) throw new ValidationError(errors.join("; "));
     const result = await loginUseCase(req.body, req);
-    res.cookie(COOKIE_NAME, result.accessToken, cookieOptions());
+    res.cookie(COOKIE_NAME, result.accessToken, cookieOptions(ACCESS_COOKIE_MAX_AGE_MS));
+    res.cookie(REFRESH_COOKIE_NAME, result.refreshToken, cookieOptions(REFRESH_COOKIE_MAX_AGE_MS));
     return res.status(200).json({
       data: {
         user: result.user,
@@ -63,10 +81,13 @@ async function me(req, res, next) {
 async function logout(req, res, next) {
   try {
     await logoutUseCase(req.user.userId, {
-      refreshToken: req.body?.refreshToken,
+      // Web không giữ refresh token trong JS nên phải lấy từ cookie, nếu không
+      // đăng xuất chỉ xoá cookie mà refresh token 7 ngày vẫn còn hiệu lực.
+      refreshToken: req.body?.refreshToken || req.cookies?.[REFRESH_COOKIE_NAME],
       deviceSessionId: req.headers["x-device-session-id"],
     });
     res.clearCookie(COOKIE_NAME, { path: "/" });
+    res.clearCookie(REFRESH_COOKIE_NAME, { path: "/" });
     return res.status(200).json({ data: { ok: true }, message: "Đăng xuất thành công" });
   } catch (e) {
     return next(e);
@@ -121,9 +142,15 @@ async function resetPassword(req, res, next) {
 
 async function refresh(req, res, next) {
   try {
-    const refreshToken = req.body?.refreshToken || req.headers["x-refresh-token"];
+    const refreshToken =
+      req.body?.refreshToken || req.headers["x-refresh-token"] || req.cookies?.[REFRESH_COOKIE_NAME];
     const result = await refreshTokenUseCase({ refreshToken });
-    res.cookie(COOKIE_NAME, result.accessToken, cookieOptions());
+    res.cookie(COOKIE_NAME, result.accessToken, cookieOptions(ACCESS_COOKIE_MAX_AGE_MS));
+    // refreshTokenUseCase xoay vòng token cũ -> phải ghi đè cookie, nếu không lần
+    // sau client trình bày đúng token đã bị thu hồi và phiên chết hẳn.
+    if (result.refreshToken) {
+      res.cookie(REFRESH_COOKIE_NAME, result.refreshToken, cookieOptions(REFRESH_COOKIE_MAX_AGE_MS));
+    }
     return res.status(200).json({
       data: result,
       message: "Cấp lại token thành công",

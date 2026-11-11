@@ -3,6 +3,17 @@
 const RequestService = require("../services/RequestService");
 const { validateCreateRequest, canDeleteRequest } = require("../validators/requestValidator");
 const errorCodes = require("../utils/errors");
+const { writeBranchSlug } = require("../utils/branchScope");
+
+// branchSlug chỉ là bộ lọc xem chéo dành cho admin. Các vai trò khác (manager) buộc
+// phải dùng chi nhánh do gateway gắn trên header, client không được tự chọn.
+// Admin KHÔNG có chi nhánh trong mô hình 3 vai trò: header do token ký ra có thể còn
+// giá trị cũ, nên chỉ lắng nghe ?branchSlug= tường minh (như NotificationController).
+function scopeBranchSlug(req) {
+  const role = req.headers["x-user-role"];
+  if (role === "admin") return req.query.branchSlug || null;
+  return req.headers["x-branch-slug"] || null;
+}
 
 // Nhân viên chỉ thấy đơn của chính mình dù client gửi employeeId khác.
 // Quản lý/admin xem theo chi nhánh hoặc toàn hệ thống.
@@ -16,7 +27,7 @@ function requestScope(req) {
   return {
     ...req.query,
     employeeId: req.query.employeeId || (privileged ? null : userId) || null,
-    branchSlug: req.query.branchSlug || req.headers["x-branch-slug"] || null,
+    branchSlug: scopeBranchSlug(req),
   };
 }
 
@@ -77,7 +88,7 @@ async function createRequest(req, res, next) {
         type: req.body.type,
         employeeId: req.body.employeeId || uid,
         targetEmployeeId: req.body.targetEmployeeId || null,
-        branchSlug: req.body.branchSlug,
+        branchSlug: writeBranchSlug(req, req.body.branchSlug),
         title: req.body.title.trim(),
         content: req.body.content.trim(),
         attachmentUrl: req.body.attachmentUrl,

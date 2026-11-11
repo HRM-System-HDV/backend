@@ -316,7 +316,14 @@ async function loginUseCase({ email, password }, req) {
   const ok = await bcrypt.compare(password, row.passwordHash);
   if (!ok) throw new UnauthorizedError("Email hoặc mật khẩu không đúng");
   const user = toSafeUser(row);
-  const payload = { userId: user.id, email: user.email, role: user.role, branchSlug: user.branchSlug };
+  // Admin không có chi nhánh trong mô hình 3 vai trò. Ký null dù DB còn sót giá trị
+  // cũ để gateway (app.js:54) không gắn x-branch-slug, nếu không admin bị giam số liệu.
+  const payload = {
+    userId: user.id,
+    email: user.email,
+    role: user.role,
+    branchSlug: user.role === "admin" ? null : user.branchSlug,
+  };
 
   let deviceSessionId = null;
   if (req) {
@@ -463,7 +470,12 @@ async function refreshTokenUseCase({ refreshToken }) {
     throw new UnauthorizedError("Người dùng không còn tồn tại");
   }
   const user = toSafeUser(row);
-  const tokenPayload = { userId: user.id, email: user.email, role: user.role, branchSlug: user.branchSlug };
+  const tokenPayload = {
+    userId: user.id,
+    email: user.email,
+    role: user.role,
+    branchSlug: user.role === "admin" ? null : user.branchSlug,
+  };
   const newAccessToken = signAccessToken(tokenPayload);
   const newRefreshToken = signRefreshToken(tokenPayload);
 
@@ -553,14 +565,22 @@ async function syncEmployeeUseCase({ employee, action = "upsert" }) {
     // của người khác đang trùng mã.
     const email = (employee.email || "").trim().toLowerCase();
     const where = employee.id ? { id: employee.id, ...(email ? { email } : {}) } : null;
+    let deleted = false;
     if (prisma && where) {
-      await prisma.user.deleteMany({ where }).catch(() => {});
+      const res = await prisma.user.deleteMany({ where }).catch(() => null);
+      deleted = Boolean(res && res.count);
     }
     const idx = memoryUsers.findIndex((u) => {
       if (!employee.id || u.id !== employee.id) return false;
       return email ? String(u.email || "").toLowerCase() === email : true;
     });
-    if (idx >= 0) memoryUsers.splice(idx, 1);
+    if (idx >= 0) {
+      memoryUsers.splice(idx, 1);
+      deleted = true;
+    }
+    // Chỉ revoke khi xoá được tài khoản. where không khớp nghĩa là lệnh xoá bị bỏ
+    // qua cố ý, mà revoke thì vẫn đá người đang dùng khỏi hệ thống.
+    if (deleted) await revokeAllSessions(employee.id);
     return { ok: true, action: "delete" };
   }
 
@@ -607,6 +627,11 @@ async function syncEmployeeUseCase({ employee, action = "upsert" }) {
           branchSlug,
         },
       });
+      // Đổi vai trò hoặc chi nhánh thì thu hồi mọi phiên: access token cũ mang
+      // theo role/branchSlug trong payload và gateway chỉ kiểm chữ ký, nên nếu
+      // không revoke, manager bị giáng xuống staff vẫn giữ quyền cũ tới hết TTL.
+      const privilegeChanged = byId.role !== role || byId.branchSlug !== branchSlug;
+      if (privilegeChanged) await revokeAllSessions(byId.id);
       return { ok: true, action: "updated", user: toSafeUser(updated) };
     } else {
       const created = await prisma.user.create({
@@ -636,6 +661,7 @@ async function syncEmployeeUseCase({ employee, action = "upsert" }) {
     const existing = byId || byEmail;
     if (existing) {
       const idx = memoryUsers.indexOf(existing);
+      const privilegeChanged = existing.role !== role || existing.branchSlug !== branchSlug;
       memoryUsers[idx] = {
         ...memoryUsers[idx],
         email,
@@ -644,6 +670,8 @@ async function syncEmployeeUseCase({ employee, action = "upsert" }) {
         roleTitle,
         branchSlug,
       };
+      // Như nhánh prisma: đổi vai trò/chi nhánh phải làm chết các phiên đang sống.
+      if (privilegeChanged) await revokeAllSessions(existing.id);
       return { ok: true, action: "updated", user: toSafeUser(memoryUsers[idx]) };
     } else {
       const newUser = {

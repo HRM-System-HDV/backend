@@ -40,10 +40,13 @@ const cases = [
   ["DELETE", "/api/employees/e-1", "staff", false],
   ["DELETE", "/api/employees/e-1", "admin", true],
 
-  // Chi nhánh / phòng ban không có màn nhân viên nào gọi ghi.
+  // Quản lý chi nhánh là tính năng hệ thống (chỉ admin gán chi nhánh cho manager).
+  // Phòng ban vẫn là nghiệp vụ vận hành chi nhánh nên manager ghi được.
   ["POST", "/api/branches", "staff", false],
-  ["PUT", "/api/branches/CN01", "manager", true],
+  ["PUT", "/api/branches/CN01", "manager", false],
+  ["PUT", "/api/branches/CN01", "admin", true],
   ["DELETE", "/api/departments/d1", "staff", false],
+  ["POST", "/api/departments", "manager", true],
 
   // Phân ca là việc của quản lý; đăng ký/hủy đăng ký là của nhân viên.
   ["POST", "/api/shifts", "staff", false],
@@ -78,29 +81,53 @@ const cases = [
   ["DELETE", "/api/tasks/t1", "staff", false],
   ["PUT", "/api/tasks/t1", "staff", true],
 
+  // Tin tức/nội quy: manager vẫn ghi (nghiệp vụ vận hành chi nhánh), staff chặn.
   ["POST", "/api/news", "staff", false],
   ["GET", "/api/news", "staff", true],
+  ["POST", "/api/news", "manager", true],
   ["PUT", "/api/regulations/n1", "manager", true],
+  // Cấu hình Wi-Fi và cấu hình SOAP là tính năng hệ thống: manager cũng bị chặn,
+  // kể cả đọc GET /api/soap-config (lộ endpointUrl/allowedIPs/certExpiry).
   ["POST", "/api/wifi-configs", "staff", false],
+  ["POST", "/api/wifi-configs", "manager", false],
+  ["PUT", "/api/wifi-configs/w1", "admin", true],
   ["GET", "/api/wifi-configs/scan", "staff", true],
   ["PUT", "/api/soap-config", "staff", false],
+  ["PUT", "/api/soap-config", "manager", false],
+  ["GET", "/api/soap-config", "staff", false],
+  ["GET", "/api/soap-config", "manager", false],
+  ["GET", "/api/soap-config", "admin", true],
+  ["POST", "/api/soap-config/ping", "manager", false],
+  // Cổng chi lương: chỉ WSDL (GET) là công khai, mọi WRITE đều dành cho admin.
+  ["POST", "/soap/payroll", "staff", false],
+  ["POST", "/soap/payroll", "manager", false],
+  ["POST", "/soap/payroll", "admin", true],
+  ["PUT", "/soap/payroll", "admin", true],
+  ["GET", "/soap/payroll", "staff", true],
 
-  // Lương: nhân viên xem phiếu của mình, không xem số tài khoản / đợt chi.
+  // Lương: nhân viên xem phiếu của mình; tài khoản ngân hàng, đợt chi lương và
+  // lệnh chi là tính năng hệ thống nên manager cũng bị chặn.
   ["GET", "/api/payroll/bank-accounts", "staff", false],
-  ["GET", "/api/payroll/bank-accounts", "manager", true],
+  ["GET", "/api/payroll/bank-accounts", "manager", false],
+  ["GET", "/api/payroll/bank-accounts", "admin", true],
   ["GET", "/api/payroll/payouts", "staff", false],
+  ["GET", "/api/payroll/payouts", "manager", false],
   ["GET", "/api/payroll/payslips", "staff", true],
   ["POST", "/api/payroll/payslips/generate", "staff", false],
+  ["POST", "/api/payroll/payslips/generate", "manager", false],
+  ["POST", "/api/payroll/payslips/generate", "admin", true],
   ["PUT", "/api/payroll/payslips/p1/status", "staff", false],
 
-  // Nhật ký: mọi vai trò ghi được, chỉ admin xóa toàn bộ.
+  // Nhật ký: mọi vai trò ghi được, xem và xóa đều chỉ admin.
   ["GET", "/api/backlog", "staff", false],
-  ["GET", "/api/backlog", "manager", true],
+  ["GET", "/api/backlog", "manager", false],
+  ["GET", "/api/backlog", "admin", true],
   ["POST", "/api/backlog", "staff", true],
   ["DELETE", "/api/backlog", "manager", false],
   ["DELETE", "/api/backlog", "admin", true],
 
-  // Cấp lại mật khẩu chỉ quản lý; sync-employee chỉ gọi nội bộ.
+  // Cấp lại mật khẩu: theo yêu cầu vẫn mở cho manager (identity-service chặn
+  // manager reset tài khoản admin). sync-employee chỉ gọi nội bộ.
   ["POST", "/api/auth/reset-password", "staff", false],
   ["POST", "/api/auth/reset-password", "manager", true],
   ["POST", "/api/auth/reset-password", "admin", true],

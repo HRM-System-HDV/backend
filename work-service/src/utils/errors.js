@@ -18,6 +18,16 @@ class NotFoundError extends Error {
   }
 }
 
+class InternalServerError extends Error {
+  constructor(message, cause) {
+    super(message || "Lỗi hệ thống");
+    this.name = "InternalServerError";
+    this.status = 500;
+    this.code = "INTERNAL_SERVER_ERROR";
+    if (cause) this.cause = cause;
+  }
+}
+
 class ForbiddenError extends Error {
   constructor(message) {
     super(message || "Không có quyền thực hiện thao tác này");
@@ -27,4 +37,4 @@ class ForbiddenError extends Error {
   }
 }
 
-module.exports = { ValidationError, NotFoundError, ForbiddenError };
+module.exports = { ValidationError, NotFoundError, ForbiddenError, InternalServerError };

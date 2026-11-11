@@ -132,7 +132,7 @@ test("nhờ làm thay: thông báo mang requestId và chỉ người nhận đư
         type: "overtime",
         employeeId: sender,
         targetEmployeeId: target,
-        branchSlug: "CN01",
+        branchSlug: "CN-0001",
         title: "Nhờ làm thay: Ca sáng",
         content: "Nhờ bạn làm thay ca sáng",
         notification: {
@@ -140,7 +140,7 @@ test("nhờ làm thay: thông báo mang requestId và chỉ người nhận đư
           shiftName: "Ca sáng",
           shiftDate: "09/11/2026",
           shiftTime: "08:00 - 12:00",
-          branch: "CN01",
+          branch: "CN-0001",
           senderName: "Người gửi",
         },
       }),

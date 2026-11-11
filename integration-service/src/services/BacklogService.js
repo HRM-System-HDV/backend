@@ -1,6 +1,14 @@
 "use strict";
 
 const database = require("../config/database");
+const errorCodes = require("../utils/errors");
+
+function serverError(message) {
+  const err = new Error(message);
+  err.status = 500;
+  err.code = errorCodes.INTERNAL_SERVER_ERROR;
+  return err;
+}
 
 const INITIAL_BACKLOGS = [
   {
@@ -114,8 +122,10 @@ async function list(query = {}) {
       });
       items = rows || [];
     } catch (err) {
-      console.warn("[BacklogService] query error, fallback to memory:", err.message);
-      items = [...memoryBacklogs];
+      // Postgres có thật mà lỗi thì phải báo lỗi: trả kho memory sẽ hiển thị
+      // fixture (kể cả bản ghi chưa từng được ghi) như thể đó là nhật ký hệ thống.
+      console.error("[BacklogService] query error:", err.message);
+      throw serverError("Không đọc được nhật ký thao tác");
     }
   } else {
     items = [...memoryBacklogs];
@@ -180,8 +190,12 @@ async function create(data = {}) {
         },
       });
       entry.id = created.id;
+      return entry;
     } catch (err) {
-      console.warn("[BacklogService] insert error:", err.message);
+      // Ghi thất bại mà vẫn unshift memory thì controller trả 201 cho một bản
+      // ghi không tồn tại ở đâu cả; lỗi phải tới tay người gọi.
+      console.error("[BacklogService] insert error:", err.message);
+      throw serverError("Không ghi được nhật ký thao tác");
     }
   }
 
@@ -195,8 +209,11 @@ async function clear() {
     try {
       await prisma.backlog.deleteMany({});
     } catch (err) {
-      console.warn("[BacklogService] clear error:", err.message);
+      // Xoá không xong mà vẫn trả ok thì admin tưởng nhật ký đã sạch.
+      console.error("[BacklogService] clear error:", err.message);
+      throw serverError("Không xóa được nhật ký thao tác");
     }
+    return { ok: true };
   }
   memoryBacklogs = [];
   return { ok: true };

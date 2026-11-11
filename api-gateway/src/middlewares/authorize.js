@@ -17,7 +17,10 @@ const rules = [
   // và chặn các trường nhạy cảm (vai trò, lương, chi nhánh).
   { methods: ["PUT"], path: /^\/api\/employees\/[^/]+$/, roles: ALL },
   { methods: WRITE, path: /^\/api\/employees(\/|$)/, roles: MANAGERS },
-  { methods: WRITE, path: /^\/api\/(branches|departments)(\/|$)/, roles: MANAGERS },
+  // Quản lý chi nhánh là tính năng hệ thống: admin gán chi nhánh cho manager,
+  // manager không bao giờ tự chuyển. Phòng ban vẫn là nghiệp vụ vận hành chi nhánh.
+  { methods: WRITE, path: /^\/api\/branches(\/|$)/, roles: ["admin"] },
+  { methods: WRITE, path: /^\/api\/departments(\/|$)/, roles: MANAGERS },
   { methods: WRITE, path: /^\/api\/shift-templates(\/|$)/, roles: MANAGERS },
   { methods: WRITE, path: /^\/api\/shifts\/templates(\/|$)/, roles: MANAGERS },
   { methods: ["PUT"], path: /^\/api\/attendance\/config$/, roles: MANAGERS },
@@ -28,11 +31,23 @@ const rules = [
   { methods: ["PUT"], path: /^\/api\/requests\/[^/]+\/(approve|reject)$/, roles: MANAGERS },
   { methods: ["DELETE"], path: /^\/api\/requests\/[^/]+$/, roles: MANAGERS },
   { methods: ["POST", "DELETE"], path: /^\/api\/tasks(\/|$)/, roles: MANAGERS },
-  { methods: WRITE, path: /^\/api\/(news|regulations|wifi-configs|soap-config)(\/|$)/, roles: MANAGERS },
-  { methods: WRITE, path: /^\/api\/payroll(\/|$)/, roles: MANAGERS },
-  // Số tài khoản và các đợt chi lương là dữ liệu quản lý, không phải của nhân viên.
-  { methods: ["GET"], path: /^\/api\/payroll\/(bank-accounts|payouts)(\/|$)/, roles: MANAGERS },
-  { methods: ["GET"], path: /^\/api\/backlog(\/|$)/, roles: MANAGERS },
+  // Tin tức/nội quy là nghiệp vụ vận hành chi nhánh nên manager vẫn ghi được;
+  // cấu hình Wi-Fi và cấu hình SOAP là tính năng hệ thống, chỉ admin.
+  { methods: WRITE, path: /^\/api\/(news|regulations)(\/|$)/, roles: MANAGERS },
+  { methods: WRITE, path: /^\/api\/(wifi-configs|soap-config)(\/|$)/, roles: ["admin"] },
+  // Đọc cấu hình SOAP lộ endpointUrl/securityMode/allowedIPs/certExpiry nên để
+  // admin; WRITE đã có luật riêng ở trên, GET thì hiện không luật nào chặn.
+  { methods: ["GET"], path: /^\/api\/soap-config(\/|$)/, roles: ["admin"] },
+  // Cổng SOAP chi lương: POST /soap/payroll trực tiếp tạo lệnh trừ tiền tài khoản
+  // công ty. publicPaths chỉ whitelist GET (WSDL) nên WRITE tới đây luôn có
+  // req.user và luật ["admin"] có tác dụng.
+  { methods: WRITE, path: /^\/soap(\/|$)/, roles: ["admin"] },
+  // Chi lương là thao tác ngân hàng, manager bị chặn theo mô hình 3 vai trò.
+  { methods: WRITE, path: /^\/api\/payroll(\/|$)/, roles: ["admin"] },
+  // Số tài khoản và các đợt chi lương là dữ liệu quản trị hệ thống.
+  { methods: ["GET"], path: /^\/api\/payroll\/(bank-accounts|payouts)(\/|$)/, roles: ["admin"] },
+  // Nhật ký thao tác hệ thống: chỉ admin được xem.
+  { methods: ["GET"], path: /^\/api\/backlog(\/|$)/, roles: ["admin"] },
   // Xóa nhật ký hoạt động là thao tác quản trị; ghi nhật ký thì mọi vai trò.
   { methods: ["DELETE"], path: /^\/api\/backlog(\/|$)/, roles: ["admin"] },
   // Lưu trữ dữ liệu cũ: xem, chạy, khôi phục đều chỉ admin.

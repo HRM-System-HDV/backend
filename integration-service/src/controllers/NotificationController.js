@@ -4,6 +4,7 @@ const NotificationService = require("../services/NotificationService");
 const { validateCreateNotification } = require("../validators/notificationValidator");
 const errorCodes = require("../utils/errors");
 const { toVnDate } = require("../utils/dateFormat");
+const { writeBranchSlug } = require("../utils/branchScope");
 
 function normalizeShiftDate(value) {
   if (!value) return null;
@@ -22,6 +23,17 @@ function normalizeMetadata(metadata) {
   return next;
 }
 
+// branchSlug chỉ là bộ lọc xem chéo dành cho admin. Manager buộc dùng chi nhánh
+// do gateway gắn trên header, client không được tự chọn.
+// Admin KHÔNG có chi nhánh trong mô hình 3 vai trò: nếu tài khoản admin còn sót
+// branchSlug (do dữ liệu cũ để lại) thì header đó không được phép giam admin
+// vào một chi nhánh — admin chỉ lọc khi hỏi tường minh bằng ?branchSlug=.
+function scopeBranchSlug(req) {
+  const role = req.headers["x-user-role"];
+  if (role === "admin") return req.query.branchSlug || null;
+  return req.headers["x-branch-slug"] || null;
+}
+
 // Nhân viên chỉ được xem phạm vi của chính mình, kể cả khi client gửi employeeId
 // của người khác. Quản lý/admin giữ quyền xem theo chi nhánh.
 function notificationScope(req) {
@@ -30,10 +42,25 @@ function notificationScope(req) {
   if (userId && role !== "admin" && role !== "manager") {
     return { employeeId: userId, branchSlug: null };
   }
+  const branchSlug = scopeBranchSlug(req);
   return {
     employeeId: req.query.employeeId || userId || null,
-    branchSlug: req.query.branchSlug || req.headers["x-branch-slug"] || null,
+    branchSlug,
+    // Admin không chọn chi nhánh thì xem chéo toàn hệ thống, nên phải thấy cả
+    // thông báo phạm vi chi nhánh (manager chỉ thấy đúng chi nhánh của mình).
+    allBranches: role === "admin" && !branchSlug,
   };
+}
+
+// Bản ghi có nằm trong đúng phạm vi mà listNotifications đang hiển thị cho người gọi?
+function canAccessNotification(req, row) {
+  return NotificationService.matchesVisibility(row, notificationScope(req));
+}
+
+function forbiddenAccess(res) {
+  return res.status(403).json({
+    error: { code: errorCodes.FORBIDDEN, message: "Bạn không có quyền thao tác với thông báo này" },
+  });
 }
 
 async function listNotifications(req, res, next) {
@@ -75,7 +102,7 @@ async function createNotification(req, res, next) {
     }
     const created = await NotificationService.create({
       targetEmployeeId: req.body.targetEmployeeId || null,
-      branchSlug: req.body.branchSlug,
+      branchSlug: writeBranchSlug(req, req.body.branchSlug),
       title: req.body.title.trim(),
       body: req.body.body.trim(),
       metadata: normalizeMetadata(req.body.metadata),
@@ -96,6 +123,17 @@ async function createNotification(req, res, next) {
 
 async function markAsRead(req, res, next) {
   try {
+    // Đọc phải kiểm tra chủ sở hữu TRƯỚC khi ghi, nếu không ai cũng đánh dấu đã đọc
+    // thông báo của người khác theo id tuần tự.
+    const existing = await NotificationService.findById(req.params.id);
+    if (!existing) {
+      return res.status(404).json({
+        error: { code: errorCodes.NOT_FOUND, message: "Không tìm thấy thông báo" },
+      });
+    }
+    if (!canAccessNotification(req, existing)) {
+      return forbiddenAccess(res);
+    }
     const row = await NotificationService.markAsRead(req.params.id);
     if (!row) {
       return res.status(404).json({
@@ -128,6 +166,9 @@ async function deleteNotification(req, res, next) {
       return res.status(404).json({
         error: { code: errorCodes.NOT_FOUND, message: "Không tìm thấy thông báo" },
       });
+    }
+    if (!canAccessNotification(req, existing)) {
+      return forbiddenAccess(res);
     }
     await NotificationService.deleteById(req.params.id);
     return res.status(200).json({ data: { ok: true }, message: "Xóa thông báo thành công" });

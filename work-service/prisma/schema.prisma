@@ -48,6 +48,7 @@ model AttendanceConfig {
   latePenaltyAmount       Int    @default(20000)
   earlyLeavePenaltyAmount Int    @default(0)
   gracePeriodMinutes      Int    @default(5)
+  checkoutWindowMinutes   Int    @default(60)
   autoCloseShift          Boolean @default(false)
   shiftSwapMode           String @default("manual")
   latePenaltyPct          Int    @default(10)

@@ -43,12 +43,23 @@ test("notifications CRUD + read", async () => {
   assert.equal(res.status, 201);
   const id = body.data.id;
 
-  res = await fetch(`${base}/api/notifications/${id}/read`, { method: "PUT" });
+  // markAsRead/delete kiểm chủ sở hữu qua header do gateway gắn sau khi verify JWT.
+  // Test gọi thẳng service nên phải tự mang định danh, nếu không 403 là đúng luật.
+  const asOwner = { "x-user-id": "e-x", "x-user-role": "staff" };
+  const asOther = { "x-user-id": "e-khac", "x-user-role": "staff" };
+
+  // Người khác không được đánh dấu đã đọc / xóa thông báo đích danh của e-x.
+  res = await fetch(`${base}/api/notifications/${id}/read`, { method: "PUT", headers: asOther });
+  assert.equal(res.status, 403);
+  res = await fetch(`${base}/api/notifications/${id}`, { method: "DELETE", headers: asOther });
+  assert.equal(res.status, 403);
+
+  res = await fetch(`${base}/api/notifications/${id}/read`, { method: "PUT", headers: asOwner });
   body = await res.json();
   assert.equal(res.status, 200);
   assert.equal(body.data.isRead, true);
 
-  res = await fetch(`${base}/api/notifications/${id}`, { method: "DELETE" });
+  res = await fetch(`${base}/api/notifications/${id}`, { method: "DELETE", headers: asOwner });
   assert.equal(res.status, 200);
 
   } finally {

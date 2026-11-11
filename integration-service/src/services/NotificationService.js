@@ -8,34 +8,35 @@ let memoryNotifications = JSON.parse(JSON.stringify(SEED_NOTIFICATIONS)).map((n)
   createdAt: new Date(),
 }));
 
-// Phạm vi nhìn thấy thông báo (BUSINESS.md §7.2):
-// - Có employeeId: chỉ broadcast (targetEmployeeId = null) + thông báo gửi đích danh mình.
-//   Không lộ thông báo gửi riêng cho nhân viên khác cùng chi nhánh.
-// - Chỉ có branchSlug (màn quản lý): broadcast + thông báo phạm vi chi nhánh đó.
-// - Không tham số: chỉ broadcast.
-function matchesVisibility(n, { employeeId, branchSlug } = {}) {
-  if (employeeId) return !n.targetEmployeeId || n.targetEmployeeId === employeeId;
-  if (branchSlug) return !n.targetEmployeeId || n.branchSlug === branchSlug;
-  return !n.targetEmployeeId;
+// Ba loại thông báo, phân biệt bằng (targetEmployeeId, branchSlug):
+// - Đích danh (targetEmployeeId != null): chỉ người đó xem/thao tác được.
+// - Broadcast thật (cả hai null): mọi người đều thấy.
+// - Phạm vi chi nhánh (target null, branchSlug != null): chỉ quản lý chi nhánh đó
+//   và admin xem chéo thấy. Nhân viên thường KHÔNG được thấy, kể cả cùng chi
+//   nhánh, vì loại này chứa danh tính người khác (ví dụ "NV X quên chốt ra").
+// Caller có thể mang cả employeeId lẫn branchSlug (manager/admin), nên phải xét
+// cả hai thay vì nhánh đầu tiên thắng.
+function matchesVisibility(n, { employeeId, branchSlug, allBranches } = {}) {
+  if (n.targetEmployeeId) return n.targetEmployeeId === employeeId;
+  if (!n.branchSlug) return true;
+  return Boolean(branchSlug) ? n.branchSlug === branchSlug : Boolean(allBranches);
 }
 
-function visibilityWhere({ employeeId, branchSlug } = {}) {
-  if (employeeId) {
-    return { OR: [{ targetEmployeeId: null }, { targetEmployeeId: employeeId }] };
-  }
-  if (branchSlug) {
-    return { OR: [{ targetEmployeeId: null }, { branchSlug }] };
-  }
-  return { OR: [{ targetEmployeeId: null }] };
+function visibilityWhere({ employeeId, branchSlug, allBranches } = {}) {
+  const or = [{ targetEmployeeId: null, branchSlug: null }];
+  if (employeeId) or.push({ targetEmployeeId: employeeId });
+  if (branchSlug) or.push({ targetEmployeeId: null, branchSlug });
+  else if (allBranches) or.push({ targetEmployeeId: null, branchSlug: { not: null } });
+  return { OR: or };
 }
 
-async function findMany({ employeeId, branchSlug } = {}) {
+async function findMany(scope = {}) {
   const prisma = database.getPrisma();
   if (!prisma) {
-    return memoryNotifications.filter((n) => matchesVisibility(n, { employeeId, branchSlug }));
+    return memoryNotifications.filter((n) => matchesVisibility(n, scope));
   }
   return prisma.notification.findMany({
-    where: visibilityWhere({ employeeId, branchSlug }),
+    where: visibilityWhere(scope),
     orderBy: { createdAt: "desc" },
   });
 }
@@ -198,6 +199,7 @@ async function updateSettings(userId, data) {
 module.exports = {
   findMany,
   findById,
+  matchesVisibility,
   create,
   markAsRead,
   markAllAsRead,

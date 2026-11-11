@@ -10,6 +10,8 @@ const {
   scopeEmployeeQuery,
   assertCanReadEmployee,
   assertCanWriteEmployee,
+  assertCanCreateEmployee,
+  assertCanDeleteEmployee,
 } = require("../utils/employeeAccess");
 
 async function listBranches(_req, res, next) {
@@ -138,7 +140,8 @@ async function createEmployee(req, res, next) {
   try {
     const errors = validateEmployee(req.body);
     if (errors.length) throw new ValidationError(errors.join("; "));
-    const row = await OrgService.createEmployee(req.body);
+    const payload = assertCanCreateEmployee(callerFrom(req), req.body);
+    const row = await OrgService.createEmployee(payload);
     return res.status(201).json({ data: row, message: "Thao tác thành công" });
   } catch (e) {
     return next(e);
@@ -167,6 +170,7 @@ async function updateEmployee(req, res, next) {
 async function deleteEmployee(req, res, next) {
   try {
     const targetId = req.params.id;
+    const caller = callerFrom(req);
     const currentUserId = req.headers["x-user-id"];
     const currentUserEmail = req.headers["x-user-email"];
 
@@ -188,6 +192,9 @@ async function deleteEmployee(req, res, next) {
       err.code = "CANNOT_DELETE_SELF";
       throw err;
     }
+
+    // Chặn xóa chéo: manager chỉ xóa người cùng chi nhánh, không ai dưới admin xóa admin.
+    assertCanDeleteEmployee(emp, caller);
 
     const ok = await OrgService.removeEmployee(targetId);
     if (!ok) {

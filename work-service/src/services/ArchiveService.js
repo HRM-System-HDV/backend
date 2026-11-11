@@ -35,18 +35,31 @@ function parseCutoff(body = {}) {
   if (hasMonths === hasDate) {
     throw httpError(400, "VALIDATION_ERROR", "Cần truyền đúng một trong hai: months hoặc cutoffDate");
   }
+  let cutoff;
   if (hasMonths) {
     const value = Number(months);
     if (!Number.isInteger(value) || value < 1 || value > 120) {
       throw httpError(400, "VALIDATION_ERROR", "months phải là số nguyên từ 1 đến 120");
     }
-    const cutoff = new Date();
+    cutoff = new Date();
     cutoff.setMonth(cutoff.getMonth() - value);
-    return cutoff;
+  } else {
+    cutoff = parseDate(cutoffDate);
+    if (!cutoff) {
+      throw httpError(400, "VALIDATION_ERROR", "cutoffDate không hợp lệ (định dạng DD/MM/YYYY, vd 31/01/2025)");
+    }
   }
-  const cutoff = parseDate(cutoffDate);
-  if (!cutoff) {
-    throw httpError(400, "VALIDATION_ERROR", "cutoffDate không hợp lệ (định dạng DD/MM/YYYY, vd 31/01/2025)");
+  // Archive xóa vĩnh viễn dòng khỏi bảng sống theo điều kiện createdAt < cutoff,
+  // nên mốc chặn phải là ngày đã qua. Chặn cả hôm nay lẫn ngày tương lai để tránh
+  // một yêu cầu sai nhầm xóa toàn bộ dữ liệu đang hoạt động.
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  if (cutoff.getTime() >= startOfToday.getTime()) {
+    throw httpError(
+      400,
+      "VALIDATION_ERROR",
+      "cutoffDate phải là ngày trong quá khứ (trước hôm nay), vui lòng chọn ngày nhỏ hơn hôm nay"
+    );
   }
   return cutoff;
 }

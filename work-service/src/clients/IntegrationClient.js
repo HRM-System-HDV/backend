@@ -34,4 +34,34 @@ async function deleteFileByUrl(url) {
   }
 }
 
-module.exports = { deleteFileByUrl, publicIdFromUrl };
+// Thông báo cho admin/manager của một chi nhánh (branchSlug + targetEmployeeId = null
+// nên bản ghi nằm trong phạm vi xem của cả manager chi nhánh đó lẫn admin).
+// Cùng kiểu gọi nội bộ, cùng timeout 5000ms (RULES §6) như deleteFileByUrl.
+async function createBranchNotification(payload) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch(`${config.integrationServiceUrl}/api/notifications`, {
+      method: "POST",
+      // integration-service lấy chi nhánh từ header do gateway ký (writeBranchSlug),
+      // nên lời gọi nội bộ không kèm header sẽ bị bỏ branchSlug và thông báo thành
+      // broadcast toàn hệ thống — lộ danh tính nhân viên quên chốt ra.
+      headers: { "Content-Type": "application/json", "x-user-role": "admin" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      throw new Error(`integration-service trả ${res.status} cho POST /api/notifications`);
+    }
+    return { ok: true, status: res.status };
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error("Gọi integration-service vượt quá thời gian chờ 5000ms");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+module.exports = { deleteFileByUrl, publicIdFromUrl, createBranchNotification };

@@ -33,6 +33,21 @@ function requirePrisma() {
   return prisma;
 }
 
+// Ngưỡng archive bắt buộc là ngày đã qua: cutoff hôm nay hoặc tương lai sẽ chuyển
+// vào kho (và xoá khỏi bảng sống) cả dữ liệu đang vận hành.
+function assertPastCutoff(cutoff) {
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (cutoff >= startOfToday) {
+    throw httpError(
+      400,
+      "VALIDATION_ERROR",
+      `Ngưỡng lưu trữ phải là ngày trong quá khứ (trước ${toVnDate(startOfToday)}), nhận được ${toVnDate(cutoff)}`
+    );
+  }
+  return cutoff;
+}
+
 function parseCutoff(body = {}) {
   const { months, cutoffDate } = body;
   const hasMonths = months !== undefined && months !== null && months !== "";
@@ -47,13 +62,13 @@ function parseCutoff(body = {}) {
     }
     const cutoff = new Date();
     cutoff.setMonth(cutoff.getMonth() - value);
-    return cutoff;
+    return assertPastCutoff(cutoff);
   }
   const cutoff = parseDate(cutoffDate);
   if (!cutoff) {
     throw httpError(400, "VALIDATION_ERROR", "cutoffDate không hợp lệ (định dạng DD/MM/YYYY, vd 31/01/2025)");
   }
-  return cutoff;
+  return assertPastCutoff(cutoff);
 }
 
 function parseTypes(types) {

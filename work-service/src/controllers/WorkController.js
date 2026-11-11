@@ -79,11 +79,12 @@ async function unregisterShift(req, res, next) {
     const body = assertSelfEmployee(req.body, callerFrom(req));
     const { employeeId, shiftId, week, preference } = body;
     if (!employeeId) throw new ValidationError("Thiếu employeeId để hủy đăng ký ca");
-    await WorkService.unregisterShift({
+    const removed = await WorkService.unregisterShift({
       employeeId,
       shiftId,
       week: week || preference,
     });
+    if (!removed) throw new NotFoundError("Không có đăng ký ca nào để hủy");
     return res.status(200).json({ data: { ok: true }, message: "Hủy đăng ký ca thành công" });
   } catch (e) {
     return next(e);
@@ -130,12 +131,17 @@ async function checkin(req, res, next) {
   }
 }
 
+// Chốt ra quá cửa sổ (ca đã bị bỏ qua): nhân viên bị WorkService chặn bằng 400, còn
+// admin/manager được chốt hộ qua chính tuyến này — assertSelfEmployee đã trả nguyên
+// body cho caller đặc quyền nên không cần endpoint "chấm công hộ" riêng. `caller`
+// chuyển xuống service để giới hạn manager đúng chi nhánh từ header gateway ký.
 async function checkout(req, res, next) {
   try {
-    const body = assertSelfEmployee(req.body, callerFrom(req));
+    const caller = callerFrom(req);
+    const body = assertSelfEmployee(req.body, caller);
     const errors = validateAttendance(body);
     if (errors.length) throw new ValidationError(errors.join("; "));
-    const row = await WorkService.checkout(body);
+    const row = await WorkService.checkout({ ...body, caller });
     return res.status(200).json({ data: row, message: "Chấm công ra thành công" });
   } catch (e) {
     return next(e);
@@ -144,7 +150,12 @@ async function checkout(req, res, next) {
 
 async function listAttendance(req, res, next) {
   try {
-    const rows = await WorkService.listAttendance(scopeOwnQuery(req.query, callerFrom(req)));
+    const caller = callerFrom(req);
+    // actor lấy từ header do gateway ký, không bao giờ từ req.query.
+    const rows = await WorkService.listAttendance({
+      ...scopeOwnQuery(req.query, caller),
+      actor: caller.userId,
+    });
     return res.status(200).json({ data: rows, message: "Thao tác thành công" });
   } catch (e) {
     return next(e);

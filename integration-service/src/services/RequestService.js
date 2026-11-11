@@ -211,6 +211,37 @@ async function reviewRequest(id, approved, { reviewedBy, reviewNote } = {}) {
   if (row.status !== "pending") {
     throw validationError("Chỉ duyệt hoặc từ chối yêu cầu đang chờ xử lý");
   }
+  // Duyệt đổi ca: hoán đổi THỰC SỰ hai ca sang work-service.
+  // Ca nguồn (của người gửi) sang người được nhờ, ca đích sang người gửi.
+  // Phải đồng bộ TRƯỚC khi ghi status: nếu work-service lỗi mà đơn đã approved
+  // thì manager nhận 500 nhưng đơn không còn pending để duyệt lại, ca vĩnh viễn
+  // không đổi.
+  if (approved && row.type === "shift_swap" && row.sourceShiftId && row.targetEmployeeId) {
+    let sourceAssigned = false;
+    try {
+      await WorkClient.updateShift(row.sourceShiftId, { employeeId: row.targetEmployeeId });
+      sourceAssigned = true;
+      if (row.targetShiftId) {
+        await WorkClient.updateShift(row.targetShiftId, { employeeId: row.employeeId });
+      }
+    } catch (e) {
+      console.error("[integration-service] Đồng bộ đổi ca sang work-service thất bại:", e.message);
+      // Nửa hoán đổi còn tệ hơn không hoán đổi: người được nhờ đang mang cả ca của
+      // mình lẫn ca vừa gán. Trả ca nguồn về chủ cũ; nếu hoàn tác cũng hỏng thì
+      // log đủ dữ liệu để sửa tay.
+      if (sourceAssigned) {
+        await WorkClient.updateShift(row.sourceShiftId, { employeeId: row.employeeId })
+          .catch((rollbackError) => {
+            console.error(
+              `[integration-service] Cần hoàn tác thủ công ca ${row.sourceShiftId} về ${row.employeeId}:`,
+              rollbackError.message
+            );
+          });
+      }
+      throw e;
+    }
+  }
+
   const updated = await update(id, {
     status: approved ? "approved" : "rejected",
     reviewedBy: reviewedBy || "admin",
@@ -229,16 +260,22 @@ async function reviewRequest(id, approved, { reviewedBy, reviewNote } = {}) {
     },
   });
 
-  // Duyệt đổi ca: đẩy cập nhật sang work-service (best-effort, không chặn luồng duyệt).
-  if (approved && row.type === "shift_swap" && row.sourceShiftId) {
-    try {
-      await WorkClient.updateShift(row.sourceShiftId, {
-        employeeId: row.employeeId,
-      });
-    } catch (e) {
-      console.warn("[integration-service] Đồng bộ đổi ca sang work-service thất bại:", e.message);
-    }
+  // Đơn nhờ làm thay / đổi ca: đồng nghiệp được nhờ cũng phải nhận kết quả cuối,
+  // nếu không họ chỉ biết phản hồi của chính mình và không hay biết gì sau đó.
+  if (row.targetEmployeeId && RESPONDABLE_TYPES.has(row.type)) {
+    await NotificationService.create({
+      targetEmployeeId: row.targetEmployeeId,
+      branchSlug: row.branchSlug,
+      title: approved ? "Yêu cầu được nhờ đã có kết quả" : "Yêu cầu được nhờ đã bị từ chối",
+      body: `${approved ? "Đã duyệt" : "Đã từ chối"}: ${row.title}${reviewNote ? ` — ${reviewNote}` : ""}`,
+      requestType: requestTypeOf(row.type),
+      metadata: {
+        requestId: id,
+        requestStatus: approved ? "approved" : "rejected",
+      },
+    });
   }
+
   return updated;
 }
 

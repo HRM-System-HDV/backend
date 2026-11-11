@@ -1,6 +1,7 @@
 "use strict";
 
 const database = require("../config/database");
+const config = require("../config");
 const { toVnDate, toVnDateTime } = require("../utils/dateFormat");
 
 function nowVn() {
@@ -15,10 +16,13 @@ let memoryConfig = {
   port: 8443,
   securityMode: "TransportWithMessageCredential (mTLS + X.509)",
   allowedIPs: ["203.162.10.45", "118.70.124.8", "123.30.55.19", "14.161.32.90"],
-  status: "healthy",
-  lastPingTime: nowVn(),
-  avgResponseTime: "128ms",
-  certExpiry: "31/12/2026",
+  // Ba trường dưới đây là KẾT QUẢ đo, không phải thuộc tính cấu hình: để "unknown"/null
+  // vì chưa có lần ping nào. Bộ mặc định cũ ("healthy", "128ms") làm màn hình Ngân hàng
+  // hiển thị độ khoẻ bịa khi CSDL chưa có dòng.
+  status: "unknown",
+  lastPingTime: null,
+  avgResponseTime: null,
+  certExpiry: null,
   channel: "Gateway (SOAP 1.2 / HTTPS)",
 };
 
@@ -65,22 +69,54 @@ async function updateConfig(payload) {
   return memoryConfig;
 }
 
+// Ping THẬT: gọi HTTP tới wsdlUrl (hoặc endpointUrl) đã cấu hình và đo thời gian phản hồi.
+// Trả về 4 trạng thái theo đúng những gì đo được:
+//   unknown  – chưa cấu hình mục tiêu
+//   healthy  – HTTP 2xx/3xx
+//   degraded – endpoint trả lời nhưng HTTP >= 400
+//   down     – không nối được / quá timeout
 async function pingGateway() {
-  const startTime = Date.now();
-  // Giả lập ping nội bộ gateway /soap/payroll?wsdl
-  const nowStr = nowVn();
-  const elapsed = `${Math.floor(Math.random() * 20 + 35)}ms`;
-  const updated = await updateConfig({
-    status: "healthy",
-    lastPingTime: nowStr,
-    avgResponseTime: elapsed,
-  });
-  return {
-    status: "healthy",
-    responseTime: elapsed,
-    pingTime: nowStr,
-    config: updated,
-  };
+  const cfg = await getConfig();
+  const pingTime = nowVn();
+  const target = cfg.wsdlUrl || cfg.endpointUrl || "";
+
+  if (!target) {
+    const updated = await updateConfig({ status: "unknown", lastPingTime: pingTime, avgResponseTime: null });
+    return {
+      status: "unknown",
+      responseTime: null,
+      pingTime,
+      endpoint: null,
+      error: "Chưa cấu hình wsdlUrl/endpointUrl để kiểm tra",
+      config: updated,
+    };
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), config.timeoutMs);
+  const startedAt = Date.now();
+  let status = "down";
+  let httpStatus = null;
+  let error = null;
+  try {
+    const res = await fetch(target, { method: "GET", signal: controller.signal });
+    httpStatus = res.status;
+    if (res.ok) {
+      status = "healthy";
+    } else {
+      status = "degraded";
+      error = `Endpoint trả HTTP ${res.status}`;
+    }
+  } catch (e) {
+    status = "down";
+    error = e.name === "AbortError" ? `Vượt quá thời gian chờ ${config.timeoutMs}ms` : e.message;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  const responseTime = `${Date.now() - startedAt}ms`;
+  const updated = await updateConfig({ status, lastPingTime: pingTime, avgResponseTime: responseTime });
+  return { status, responseTime, pingTime, endpoint: target, httpStatus, error, config: updated };
 }
 
 module.exports = { getConfig, updateConfig, pingGateway };
