@@ -64,6 +64,44 @@ test("shifts + attendance + tasks flow", async () => {
   assert.equal(res.status, 200);
   assert.ok(typeof body.data.penaltyAmount === "number");
 
+  // Checkin với checkinTime & Checkout với checkoutTime
+  res = await fetch(`${base}/api/attendance/checkin`, {
+    method: "POST",
+    headers: asAdmin,
+    body: JSON.stringify({ employeeId: "e-staff-time-test", checkinTime: "08:15" }),
+  });
+  body = await res.json();
+  assert.equal(res.status, 201);
+  assert.equal(body.data.checkIn, "08:15");
+
+  res = await fetch(`${base}/api/attendance/checkout`, {
+    method: "POST",
+    headers: asAdmin,
+    body: JSON.stringify({ employeeId: "e-staff-time-test", checkoutTime: "17:45" }),
+  });
+  body = await res.json();
+  assert.equal(res.status, 200);
+  assert.equal(body.data.checkOut, "17:45");
+
+  // Checkin & Checkout ưu tiên time hơn checkinTime/checkoutTime
+  res = await fetch(`${base}/api/attendance/checkin`, {
+    method: "POST",
+    headers: asAdmin,
+    body: JSON.stringify({ employeeId: "e-staff-precedence-test", time: "09:00", checkinTime: "08:15" }),
+  });
+  body = await res.json();
+  assert.equal(res.status, 201);
+  assert.equal(body.data.checkIn, "09:00");
+
+  res = await fetch(`${base}/api/attendance/checkout`, {
+    method: "POST",
+    headers: asAdmin,
+    body: JSON.stringify({ employeeId: "e-staff-precedence-test", time: "18:00", checkoutTime: "17:45" }),
+  });
+  body = await res.json();
+  assert.equal(res.status, 200);
+  assert.equal(body.data.checkOut, "18:00");
+
   res = await fetch(`${base}/api/attendance?employeeId=e-staff-1`, { headers: asAdmin });
   body = await res.json();
   assert.equal(res.status, 200);

@@ -47,14 +47,8 @@ async function post(path, body) {
   return { res, body: await res.json() };
 }
 
-test("preview đếm đúng nhiệm vụ hoàn thành quá hạn", async () => {
-  const { res, body } = await post("/api/archive/work/preview", { months: 6, types: ["task"] });
-  assert.equal(res.status, 200);
-  assert.ok(body.data.counts.task >= 1);
-});
-
 test("payload sai chuẩn trả 400 tiếng Việt", async () => {
-  let r = await post("/api/archive/work/preview", {});
+  let r = await post("/api/archive/work/run", {});
   assert.equal(r.res.status, 400);
   r = await post("/api/archive/work/run", { months: 6, types: ["shift"] });
   assert.equal(r.res.status, 400);

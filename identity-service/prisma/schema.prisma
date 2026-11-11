@@ -22,3 +22,35 @@ model User {
 
   @@map("users")
 }
+
+model DeviceSession {
+  id         String   @id @default(cuid())
+  userId     String
+  deviceName String
+  deviceType String   @default("desktop") // phone | tablet | desktop
+  osInfo     String?
+  location   String?  @default("Hà Nội, Việt Nam")
+  ipAddress  String?
+  lastActive String   @default("Đang hoạt động")
+  isCurrent  Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([userId])
+  @@map("device_sessions")
+}
+
+model RefreshToken {
+  id              String   @id @default(cuid())
+  token           String   @unique
+  userId          String
+  deviceSessionId String?
+  expiresAt       DateTime?
+  revoked         Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([userId])
+  @@index([deviceSessionId])
+  @@map("refresh_tokens")
+}

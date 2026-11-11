@@ -85,136 +85,227 @@ async function ensureSeeded() {
   return { mode: "postgres", count };
 }
 
-// --- Quản lý phiên thiết bị (gộp từ DeviceRepository cũ, lưu in-memory) ---
-const userDevices = new Map();
+// --- Quản lý phiên thiết bị: mỗi phiên gắn với refresh token để thu hồi thật ---
+const userDevices = new Map(); // userId -> [device] (fallback in-memory)
+const memoryTokens = new Map(); // token -> { userId, deviceSessionId, revoked }
 
 function parseClientInfo(req) {
   const ua = req.headers["user-agent"] || "";
   const ip = req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "127.0.0.1";
 
-  let deviceName = req.headers["x-device-name"];
-  let deviceType = req.headers["x-device-type"];
-  let osInfo = req.headers["x-os-info"];
-
-  if (!deviceName) {
-    if (ua.includes("iPhone")) {
-      deviceName = "iPhone 15 Pro Max";
-      deviceType = "phone";
-      osInfo = "iOS 18.0 • HRM Mobile";
-    } else if (ua.includes("iPad")) {
-      deviceName = "iPad Pro 11\"";
-      deviceType = "tablet";
-      osInfo = "iPadOS 17.5 • HRM Mobile";
-    } else if (ua.includes("Android")) {
-      deviceName = "Samsung Galaxy S24";
-      deviceType = "phone";
-      osInfo = "Android 14 • HRM Mobile";
-    } else if (ua.includes("Macintosh")) {
-      deviceName = "MacBook Pro 14\"";
-      deviceType = "desktop";
-      osInfo = "macOS Sonoma • Chrome 127";
-    } else if (ua.includes("Windows")) {
-      deviceName = "Windows PC";
-      deviceType = "desktop";
-      osInfo = "Windows 11 • Edge 127";
-    } else {
-      deviceName = "Trình duyệt Web";
-      deviceType = "desktop";
-      osInfo = "Web Portal";
+  // Header chỉ chứa ASCII nên client encode URI; giải mã để lấy tên thật.
+  const readHeader = (name) => {
+    const raw = req.headers[name];
+    if (!raw) return null;
+    try {
+      return decodeURIComponent(raw);
+    } catch (_) {
+      return raw;
     }
+  };
+
+  // Thông tin thật do client gửi; thiếu thì ghi chung chung, không đoán model cụ thể.
+  const deviceName = readHeader("x-device-name") || "Thiết bị không xác định";
+  let deviceType = readHeader("x-device-type");
+  if (!deviceType) {
+    if (/iPhone|Android.*Mobile|Windows Phone/i.test(ua)) deviceType = "phone";
+    else if (/iPad|Tablet/i.test(ua)) deviceType = "tablet";
+    else deviceType = "desktop";
   }
+  const osInfo = readHeader("x-os-info") || "HRM System";
 
   return {
     deviceName,
-    deviceType: deviceType || "desktop",
-    osInfo: osInfo || "HRM System",
-    location: "Hà Nội, Việt Nam",
+    deviceType,
+    osInfo,
+    location: "Không xác định",
     ipAddress: typeof ip === "string" ? ip.split(",")[0].trim() : "127.0.0.1",
   };
 }
 
-function initDefaultDevices() {
-  return [
-    {
-      id: "dev-01",
-      deviceName: "iPhone 15 Pro Max",
-      deviceType: "phone",
-      osInfo: "iOS 18.0 • Ứng dụng HRM Mobile",
-      location: "Hà Nội, Việt Nam",
-      ipAddress: "113.161.45.120",
-      lastActive: "Đang hoạt động",
-      isCurrent: true,
-      createdAt: new Date().toISOString(),
-    },
-    {
-      id: "dev-02",
-      deviceName: "iPad Pro 11\"",
-      deviceType: "tablet",
-      osInfo: "iPadOS 17.5 • Ứng dụng HRM Mobile",
-      location: "Hà Nội, Việt Nam",
-      ipAddress: "113.161.45.120",
-      lastActive: "2 giờ trước",
-      isCurrent: false,
-      createdAt: new Date(Date.now() - 7200000).toISOString(),
-    },
-    {
-      id: "dev-03",
-      deviceName: "MacBook Pro 14\"",
-      deviceType: "desktop",
-      osInfo: "macOS Sonoma • Chrome 127",
-      location: "Hà Nội, Việt Nam",
-      ipAddress: "14.241.224.89",
-      lastActive: "Hôm qua lúc 18:30",
-      isCurrent: false,
-      createdAt: new Date(Date.now() - 86400000).toISOString(),
-    },
-  ];
+function lastActiveLabel(updatedAt, isCurrent) {
+  if (isCurrent) return "Đang hoạt động";
+  const t = updatedAt instanceof Date ? updatedAt : new Date(updatedAt);
+  if (Number.isNaN(t.getTime())) return "Không rõ";
+  const mins = Math.floor((Date.now() - t.getTime()) / 60000);
+  if (mins < 1) return "Vừa xong";
+  if (mins < 60) return `${mins} phút trước`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} giờ trước`;
+  const days = Math.floor(hours / 24);
+  if (days === 1) return "Hôm qua";
+  if (days < 7) return `${days} ngày trước`;
+  return `${t.getDate()}/${t.getMonth() + 1}/${t.getFullYear()}`;
 }
 
-async function getDevicesByUserId(userId) {
-  if (!userDevices.has(userId)) {
-    userDevices.set(userId, initDefaultDevices());
+function serializeDevice(d, currentSessionId) {
+  const isCurrent = d.id === currentSessionId;
+  return {
+    id: d.id,
+    deviceName: d.deviceName,
+    deviceType: d.deviceType,
+    osInfo: d.osInfo,
+    location: d.location,
+    ipAddress: d.ipAddress,
+    lastActive: lastActiveLabel(d.updatedAt || d.createdAt, isCurrent),
+    isCurrent,
+    createdAt: d.createdAt && d.createdAt.toISOString ? d.createdAt.toISOString() : String(d.createdAt),
+  };
+}
+
+async function getDevicesByUserId(userId, currentSessionId) {
+  const prisma = database.getPrisma();
+  if (prisma) {
+    try {
+      const devices = await prisma.deviceSession.findMany({
+        where: { userId },
+        orderBy: { createdAt: "desc" },
+      });
+      return devices.map((d) => serializeDevice(d, currentSessionId));
+    } catch (err) {
+      console.error("[identity-service] Lỗi getDevicesByUserId prisma:", err);
+    }
   }
-  return userDevices.get(userId);
+  return (userDevices.get(userId) || []).map((d) => serializeDevice(d, currentSessionId));
 }
 
 async function registerDevice(userId, req) {
   const client = parseClientInfo(req);
-  const devices = await getDevicesByUserId(userId);
-
-  devices.forEach((d) => (d.isCurrent = false));
-
-  const existingIndex = devices.findIndex(
-    (d) => d.deviceName === client.deviceName && d.ipAddress === client.ipAddress
-  );
-
-  const newDevice = {
-    id: existingIndex >= 0 ? devices[existingIndex].id : `dev-${Date.now().toString().slice(-4)}`,
-    deviceName: client.deviceName,
-    deviceType: client.deviceType,
-    osInfo: client.osInfo,
-    location: client.location,
-    ipAddress: client.ipAddress,
-    lastActive: "Đang hoạt động",
-    isCurrent: true,
-    createdAt: new Date().toISOString(),
-  };
-
-  if (existingIndex >= 0) {
-    devices[existingIndex] = newDevice;
-  } else {
-    devices.unshift(newDevice);
+  const prisma = database.getPrisma();
+  if (prisma) {
+    try {
+      const existing = await prisma.deviceSession.findFirst({
+        where: { userId, deviceName: client.deviceName, ipAddress: client.ipAddress },
+      });
+      if (existing) {
+        // Đăng nhập lại trên cùng thiết bị: token cũ của phiên đó hết hiệu lực.
+        await prisma.refreshToken.updateMany({
+          where: { deviceSessionId: existing.id },
+          data: { revoked: true },
+        });
+        return await prisma.deviceSession.update({
+          where: { id: existing.id },
+          data: {
+            deviceType: client.deviceType,
+            osInfo: client.osInfo,
+            location: client.location,
+            lastActive: "Đang hoạt động",
+          },
+        });
+      }
+      return await prisma.deviceSession.create({
+        data: {
+          userId,
+          deviceName: client.deviceName,
+          deviceType: client.deviceType,
+          osInfo: client.osInfo,
+          location: client.location,
+          ipAddress: client.ipAddress,
+          lastActive: "Đang hoạt động",
+          isCurrent: false,
+        },
+      });
+    } catch (err) {
+      console.error("[identity-service] Lỗi registerDevice prisma:", err);
+    }
   }
 
+  const devices = userDevices.get(userId) || [];
+  const existing = devices.find(
+    (d) => d.deviceName === client.deviceName && d.ipAddress === client.ipAddress
+  );
+  if (existing) {
+    for (const rec of memoryTokens.values()) {
+      if (rec.userId === userId && rec.deviceSessionId === existing.id) rec.revoked = true;
+    }
+    Object.assign(existing, client, { lastActive: "Đang hoạt động", updatedAt: new Date().toISOString() });
+    return existing;
+  }
+  const device = {
+    id: `dev-${crypto.randomUUID()}`,
+    userId,
+    ...client,
+    lastActive: "Đang hoạt động",
+    isCurrent: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  devices.unshift(device);
   userDevices.set(userId, devices);
-  return newDevice;
+  return device;
+}
+
+async function storeRefreshToken(token, userId, deviceSessionId) {
+  const prisma = database.getPrisma();
+  if (prisma) {
+    try {
+      await prisma.refreshToken.upsert({
+        where: { token },
+        update: { revoked: false, deviceSessionId },
+        create: { token, userId, deviceSessionId },
+      });
+      return;
+    } catch (err) {
+      console.error("[identity-service] Lỗi lưu refreshToken prisma:", err);
+    }
+  }
+  memoryTokens.set(token, { userId, deviceSessionId, revoked: false });
 }
 
 async function removeDevice(userId, deviceId) {
-  const devices = await getDevicesByUserId(userId);
-  const filtered = devices.filter((d) => d.id !== deviceId);
+  const prisma = database.getPrisma();
+  if (prisma) {
+    try {
+      const sessions = await prisma.deviceSession.findMany({
+        where: {
+          userId,
+          OR: [{ id: deviceId }, { id: { endsWith: `_${deviceId}` } }],
+        },
+        select: { id: true },
+      });
+      const ids = sessions.map((s) => s.id);
+      if (ids.length) {
+        await prisma.refreshToken.updateMany({
+          where: { deviceSessionId: { in: ids } },
+          data: { revoked: true },
+        });
+        await prisma.deviceSession.deleteMany({ where: { id: { in: ids } } });
+      }
+      const remainingCount = await prisma.deviceSession.count({ where: { userId } });
+      return { removed: ids.length > 0, remainingCount };
+    } catch (err) {
+      console.error("[identity-service] Lỗi removeDevice prisma:", err);
+    }
+  }
+
+  const devices = userDevices.get(userId) || [];
+  const removedIds = devices
+    .filter((d) => d.id === deviceId || d.id.endsWith(`_${deviceId}`))
+    .map((d) => d.id);
+  for (const rec of memoryTokens.values()) {
+    if (rec.userId === userId && removedIds.includes(rec.deviceSessionId)) rec.revoked = true;
+  }
+  const filtered = devices.filter((d) => !removedIds.includes(d.id));
   userDevices.set(userId, filtered);
-  return { removed: true, remainingCount: filtered.length };
+  return { removed: removedIds.length > 0, remainingCount: filtered.length };
+}
+
+// Đổi mật khẩu / đăng xuất toàn bộ: mọi refresh token và phiên thiết bị chết ngay.
+async function revokeAllSessions(userId) {
+  const prisma = database.getPrisma();
+  if (prisma) {
+    try {
+      await prisma.refreshToken.updateMany({ where: { userId }, data: { revoked: true } });
+      await prisma.deviceSession.deleteMany({ where: { userId } });
+      return;
+    } catch (err) {
+      console.error("[identity-service] Lỗi revokeAllSessions prisma:", err);
+    }
+  }
+  for (const rec of memoryTokens.values()) {
+    if (rec.userId === userId) rec.revoked = true;
+  }
+  userDevices.delete(userId);
 }
 
 // --- Use cases ---
@@ -227,18 +318,25 @@ async function loginUseCase({ email, password }, req) {
   const user = toSafeUser(row);
   const payload = { userId: user.id, email: user.email, role: user.role, branchSlug: user.branchSlug };
 
+  let deviceSessionId = null;
   if (req) {
     try {
-      await registerDevice(user.id, req);
+      const device = await registerDevice(user.id, req);
+      deviceSessionId = device ? device.id : null;
     } catch (_) {
       // Bỏ qua lỗi ghi nhận thiết bị
     }
   }
 
+  const accessToken = signAccessToken(payload);
+  const refreshToken = signRefreshToken(payload);
+  await storeRefreshToken(refreshToken, user.id, deviceSessionId);
+
   return {
     user,
-    accessToken: signAccessToken(payload),
-    refreshToken: signRefreshToken(payload),
+    accessToken,
+    refreshToken,
+    deviceSessionId,
   };
 }
 
@@ -267,7 +365,9 @@ async function changePasswordUseCase({ userId, currentPassword, newPassword }) {
   }
   const newHash = await bcrypt.hash(newPassword, 10);
   await updateUserPassword(userId, newHash);
-  return { ok: true };
+  // Đổi mật khẩu là đăng xuất mọi thiết bị: token cũ không được sống tiếp.
+  await revokeAllSessions(userId);
+  return { ok: true, allSessionsRevoked: true };
 }
 
 // Hệ thống chưa có kênh gửi email/SMS nên không thể tự đặt lại mật khẩu an toàn.
@@ -305,6 +405,7 @@ async function resetPasswordByAdminUseCase({ email, actor }) {
   }
   const tempPassword = crypto.randomBytes(9).toString("base64url");
   await updateUserPassword(row.id, await bcrypt.hash(tempPassword, 10));
+  await revokeAllSessions(row.id);
   return { ok: true, email: row.email, tempPassword };
 }
 
@@ -321,26 +422,125 @@ async function refreshTokenUseCase({ refreshToken }) {
   if (payload.type !== "refresh") {
     throw new UnauthorizedError("Token cung cấp không phải là refresh token");
   }
+
+  const prisma = database.getPrisma();
+  let tokenRecord = null;
+  if (prisma) {
+    try {
+      tokenRecord = await prisma.refreshToken.findUnique({
+        where: { token: refreshToken },
+      });
+    } catch (err) {
+      console.error("[identity-service] Lỗi kiểm tra refreshToken:", err);
+    }
+  } else {
+    tokenRecord = memoryTokens.get(refreshToken) || null;
+  }
+  if (tokenRecord && tokenRecord.revoked) {
+    throw new UnauthorizedError("Refresh token đã bị thu hồi");
+  }
+  if (tokenRecord && tokenRecord.deviceSessionId) {
+    // Phiên thiết bị đã bị gỡ từ xa thì token chết ngay, không cấp lại được.
+    let sessionAlive = true;
+    if (prisma) {
+      try {
+        sessionAlive = !!(await prisma.deviceSession.findUnique({
+          where: { id: tokenRecord.deviceSessionId },
+        }));
+      } catch (_) {}
+    } else {
+      sessionAlive = (userDevices.get(payload.userId) || []).some(
+        (d) => d.id === tokenRecord.deviceSessionId
+      );
+    }
+    if (!sessionAlive) {
+      throw new UnauthorizedError("Phiên đăng nhập đã bị đăng xuất khỏi thiết bị");
+    }
+  }
+
   const row = await findUserById(payload.userId);
   if (!row) {
     throw new UnauthorizedError("Người dùng không còn tồn tại");
   }
   const user = toSafeUser(row);
   const tokenPayload = { userId: user.id, email: user.email, role: user.role, branchSlug: user.branchSlug };
+  const newAccessToken = signAccessToken(tokenPayload);
+  const newRefreshToken = signRefreshToken(tokenPayload);
+
+  const deviceSessionId = tokenRecord ? tokenRecord.deviceSessionId : null;
+  if (prisma) {
+    try {
+      await prisma.refreshToken.updateMany({
+        where: { token: refreshToken },
+        data: { revoked: true },
+      });
+      if (deviceSessionId) {
+        await prisma.deviceSession.update({
+          where: { id: deviceSessionId },
+          data: { lastActive: "Đang hoạt động" },
+        }).catch(() => {});
+      }
+    } catch (err) {
+      console.error("[identity-service] Lỗi cập nhật refreshToken:", err);
+    }
+  } else if (tokenRecord) {
+    tokenRecord.revoked = true;
+  }
+  await storeRefreshToken(newRefreshToken, user.id, deviceSessionId);
+
   return {
     user,
-    accessToken: signAccessToken(tokenPayload),
-    refreshToken: signRefreshToken(tokenPayload),
+    accessToken: newAccessToken,
+    refreshToken: newRefreshToken,
   };
 }
 
-async function getDevicesUseCase(userId) {
-  return await getDevicesByUserId(userId);
+async function getDevicesUseCase(userId, currentSessionId) {
+  return await getDevicesByUserId(userId, currentSessionId);
 }
 
 async function revokeDeviceUseCase(userId, deviceId) {
   if (!deviceId) throw new ValidationError("Thiếu deviceId");
   return await removeDevice(userId, deviceId);
+}
+
+// Đăng xuất chủ động: thu hồi token + xóa phiên của chính thiết bị đang gọi.
+async function logoutUseCase(userId, { refreshToken, deviceSessionId } = {}) {
+  const prisma = database.getPrisma();
+  if (prisma) {
+    try {
+      if (refreshToken) {
+        await prisma.refreshToken.updateMany({
+          where: { token: refreshToken, userId },
+          data: { revoked: true },
+        });
+      }
+      if (deviceSessionId) {
+        await prisma.refreshToken.updateMany({
+          where: { userId, deviceSessionId },
+          data: { revoked: true },
+        });
+        await prisma.deviceSession.deleteMany({ where: { userId, id: deviceSessionId } });
+      }
+      return { ok: true };
+    } catch (err) {
+      console.error("[identity-service] Lỗi logoutUseCase prisma:", err);
+    }
+  }
+  if (refreshToken) {
+    const rec = memoryTokens.get(refreshToken);
+    if (rec && rec.userId === userId) rec.revoked = true;
+  }
+  if (deviceSessionId) {
+    for (const rec of memoryTokens.values()) {
+      if (rec.userId === userId && rec.deviceSessionId === deviceSessionId) rec.revoked = true;
+    }
+    userDevices.set(
+      userId,
+      (userDevices.get(userId) || []).filter((d) => d.id !== deviceSessionId)
+    );
+  }
+  return { ok: true };
 }
 
 async function syncEmployeeUseCase({ employee, action = "upsert" }) {
@@ -473,5 +673,6 @@ module.exports = {
   refreshTokenUseCase,
   getDevicesUseCase,
   revokeDeviceUseCase,
+  logoutUseCase,
   syncEmployeeUseCase,
 };

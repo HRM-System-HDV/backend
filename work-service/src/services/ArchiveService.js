@@ -69,18 +69,6 @@ function parseLimit(limit) {
   return value;
 }
 
-async function preview(body = {}) {
-  const prisma = requirePrisma();
-  const cutoff = parseCutoff(body);
-  const types = parseTypes(body.types);
-  const counts = {};
-  for (const type of types) {
-    const spec = TYPES[type];
-    counts[type] = await prisma[spec.model].count({ where: spec.where(cutoff) });
-  }
-  return { cutoffDate: toVnDate(cutoff), counts };
-}
-
 // Chuyển từng batch trong một transaction; client lặp tới khi remaining = 0
 // để mỗi lời gọi nằm trong timeout 5000ms của gateway.
 async function run(body = {}) {
@@ -173,4 +161,4 @@ async function restore(id) {
   return { restored: true, id };
 }
 
-module.exports = { preview, run, list, detail, restore };
+module.exports = { run, list, detail, restore };

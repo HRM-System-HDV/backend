@@ -77,36 +77,22 @@ function formatNow() {
 async function ensureTableAndSeed(prisma) {
   if (seededInDb || !prisma) return;
   try {
-    await prisma.$executeRawUnsafe(`
-      CREATE TABLE IF NOT EXISTS backlogs (
-        id TEXT PRIMARY KEY,
-        timestamp TEXT NOT NULL,
-        user_name TEXT NOT NULL,
-        user_role TEXT DEFAULT 'staff',
-        action TEXT NOT NULL,
-        action_label TEXT NOT NULL,
-        module TEXT NOT NULL,
-        target_name TEXT NOT NULL,
-        description TEXT,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    const countRes = await prisma.$queryRawUnsafe(`SELECT COUNT(*)::int AS count FROM backlogs`);
-    const count = countRes?.[0]?.count ?? 0;
+    const count = await prisma.backlog.count();
     if (count === 0) {
       for (const item of INITIAL_BACKLOGS) {
-        await prisma.$executeRawUnsafe(
-          `INSERT INTO backlogs (id, timestamp, user_name, user_role, action, action_label, module, target_name, description) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING`,
-          item.id,
-          item.timestamp,
-          item.userName,
-          item.userRole,
-          item.action,
-          item.actionLabel,
-          item.module,
-          item.targetName,
-          item.description || ""
-        );
+        await prisma.backlog.create({
+          data: {
+            id: item.id,
+            timestamp: item.timestamp,
+            userName: item.userName,
+            userRole: item.userRole || "staff",
+            action: item.action,
+            actionLabel: item.actionLabel,
+            module: item.module,
+            targetName: item.targetName,
+            description: item.description || "",
+          },
+        }).catch(() => {});
       }
     }
     seededInDb = true;
@@ -122,9 +108,10 @@ async function list(query = {}) {
   if (prisma) {
     try {
       await ensureTableAndSeed(prisma);
-      const rows = await prisma.$queryRawUnsafe(
-        `SELECT id, timestamp, user_name as "userName", user_role as "userRole", action, action_label as "actionLabel", module, target_name as "targetName", description, created_at as "createdAt" FROM backlogs ORDER BY created_at DESC LIMIT 500`
-      );
+      const rows = await prisma.backlog.findMany({
+        orderBy: { createdAt: "desc" },
+        take: 500,
+      });
       items = rows || [];
     } catch (err) {
       console.warn("[BacklogService] query error, fallback to memory:", err.message);
@@ -179,18 +166,20 @@ async function create(data = {}) {
   if (prisma) {
     try {
       await ensureTableAndSeed(prisma);
-      await prisma.$executeRawUnsafe(
-        `INSERT INTO backlogs (id, timestamp, user_name, user_role, action, action_label, module, target_name, description) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        entry.id,
-        entry.timestamp,
-        entry.userName,
-        entry.userRole,
-        entry.action,
-        entry.actionLabel,
-        entry.module,
-        entry.targetName,
-        entry.description
-      );
+      const created = await prisma.backlog.create({
+        data: {
+          id: entry.id,
+          timestamp: entry.timestamp,
+          userName: entry.userName,
+          userRole: entry.userRole,
+          action: entry.action,
+          actionLabel: entry.actionLabel,
+          module: entry.module,
+          targetName: entry.targetName,
+          description: entry.description,
+        },
+      });
+      entry.id = created.id;
     } catch (err) {
       console.warn("[BacklogService] insert error:", err.message);
     }
@@ -204,7 +193,7 @@ async function clear() {
   const prisma = database.getPrisma();
   if (prisma) {
     try {
-      await prisma.$executeRawUnsafe(`DELETE FROM backlogs`);
+      await prisma.backlog.deleteMany({});
     } catch (err) {
       console.warn("[BacklogService] clear error:", err.message);
     }

@@ -121,7 +121,7 @@ const cases = [
   // Lưu trữ dữ liệu cũ: mọi thao tác (xem/chạy/khôi phục) chỉ admin.
   ["POST", "/api/archive/work/run", "staff", false],
   ["POST", "/api/archive/work/run", "manager", false],
-  ["POST", "/api/archive/integration/preview", "manager", false],
+  ["POST", "/api/archive/integration/run", "manager", false],
   ["GET", "/api/archive/work/tasks", "manager", false],
   ["GET", "/api/archive/integration/requests", "staff", false],
   ["GET", "/api/archive/integration/notifications/n1", "staff", false],

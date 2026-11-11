@@ -2,15 +2,6 @@
 
 const ArchiveService = require("../services/ArchiveService");
 
-async function preview(req, res, next) {
-  try {
-    const data = await ArchiveService.preview(req.body || {});
-    return res.status(200).json({ data, message: "Xem trước số lượng bản ghi lưu trữ thành công" });
-  } catch (err) {
-    next(err);
-  }
-}
-
 async function run(req, res, next) {
   try {
     const data = await ArchiveService.run(req.body || {});
@@ -53,4 +44,4 @@ function restoreHandler(type) {
   };
 }
 
-module.exports = { preview, run, listHandler, detailHandler, restoreHandler };
+module.exports = { run, listHandler, detailHandler, restoreHandler };

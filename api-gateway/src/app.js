@@ -7,6 +7,7 @@ const morgan = require("morgan");
 const { createProxyMiddleware } = require("http-proxy-middleware");
 const config = require("./config");
 const { errorHandler } = require("./middlewares/errorHandler");
+const { correlationMiddleware } = require("./middlewares/logging");
 const { createAuthMiddleware } = require("./middlewares/auth");
 const { createAuthorizeMiddleware } = require("./middlewares/authorize");
 const { createRateLimitMiddleware } = require("./middlewares/rateLimit");
@@ -17,6 +18,7 @@ app.use(morgan("dev"));
 // CORS cho phiên cookie hrm-session: chỉ định origin cụ thể, không dùng "*".
 app.use(cors({ origin: config.corsOrigin, credentials: true }));
 app.use(cookieParser());
+app.use(correlationMiddleware);
 
 app.get("/health", (_req, res) => {
   res.status(200).json({ status: "ok", service: config.serviceName, time: new Date().toISOString() });
@@ -50,6 +52,9 @@ function proxyTo(pathFilter, target, label) {
           if (req.user.email) proxyReq.setHeader("x-user-email", String(req.user.email));
           if (req.user.role) proxyReq.setHeader("x-user-role", String(req.user.role));
           if (req.user.branchSlug) proxyReq.setHeader("x-branch-slug", String(req.user.branchSlug));
+        }
+        if (req.correlationId) {
+          proxyReq.setHeader("x-correlation-id", req.correlationId);
         }
       },
       error: (err, _req, res) => {

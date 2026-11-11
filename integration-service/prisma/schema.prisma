@@ -52,14 +52,20 @@ model Notification {
 }
 
 // Cài đặt nhận thông báo của từng người dùng (id = x-user-id do gateway xác thực).
+// Khóa phải trùng khớp 10 switch trong mobile notif_settings.dart.
 model NotificationSetting {
-  id             String   @id
-  remindCheckIn  Boolean  @default(true)
-  remindCheckOut Boolean  @default(true)
-  remindShift    Boolean  @default(true)
-  notifyTask     Boolean  @default(true)
-  notifyLeave    Boolean  @default(true)
-  updatedAt      DateTime @updatedAt
+  id                     String   @id
+  checkInBefore1Hour     Boolean  @default(true)
+  checkInBefore30Min     Boolean  @default(true)
+  checkInBefore10Min     Boolean  @default(true)
+  checkOutBefore10Min    Boolean  @default(true)
+  missedCheckOutAfter10Min Boolean @default(true)
+  missedCheckOutAfter30Min Boolean @default(true)
+  missedCheckOutAfter1Hour Boolean @default(true)
+  tabNotificationAlert   Boolean  @default(true)
+  soundEnabled           Boolean  @default(true)
+  vibrateEnabled         Boolean  @default(true)
+  updatedAt              DateTime @updatedAt
 
   @@map("notification_settings")
 }
@@ -129,10 +135,9 @@ model WifiConfig {
   @@map("wifi_configs")
 }
 
-// BacklogService tạo bảng này bằng raw SQL. Phải khai báo ở đây, nếu không
-// `prisma db push` coi là bảng lạ và DROP mất nhật ký hoạt động.
+// Backlog model chuẩn hóa Prisma ORM (P2-5c)
 model Backlog {
-  id          String    @id
+  id          String    @id @default(cuid())
   timestamp   String
   userName    String    @map("user_name")
   userRole    String?   @default("staff") @map("user_role")

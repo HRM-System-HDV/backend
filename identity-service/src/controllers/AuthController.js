@@ -9,6 +9,7 @@ const {
   refreshTokenUseCase,
   getDevicesUseCase,
   revokeDeviceUseCase,
+  logoutUseCase,
   syncEmployeeUseCase,
 } = require("../services/AuthService");
 const {
@@ -37,7 +38,12 @@ async function login(req, res, next) {
     const result = await loginUseCase(req.body, req);
     res.cookie(COOKIE_NAME, result.accessToken, cookieOptions());
     return res.status(200).json({
-      data: { user: result.user, accessToken: result.accessToken, refreshToken: result.refreshToken },
+      data: {
+        user: result.user,
+        accessToken: result.accessToken,
+        refreshToken: result.refreshToken,
+        deviceSessionId: result.deviceSessionId,
+      },
       message: "Đăng nhập thành công",
     });
   } catch (e) {
@@ -54,8 +60,12 @@ async function me(req, res, next) {
   }
 }
 
-async function logout(_req, res, next) {
+async function logout(req, res, next) {
   try {
+    await logoutUseCase(req.user.userId, {
+      refreshToken: req.body?.refreshToken,
+      deviceSessionId: req.headers["x-device-session-id"],
+    });
     res.clearCookie(COOKIE_NAME, { path: "/" });
     return res.status(200).json({ data: { ok: true }, message: "Đăng xuất thành công" });
   } catch (e) {
@@ -125,7 +135,7 @@ async function refresh(req, res, next) {
 
 async function getDevices(req, res, next) {
   try {
-    const devices = await getDevicesUseCase(req.user.userId);
+    const devices = await getDevicesUseCase(req.user.userId, req.headers["x-device-session-id"]);
     return res.status(200).json({ data: devices, message: "Thao tác thành công" });
   } catch (e) {
     return next(e);

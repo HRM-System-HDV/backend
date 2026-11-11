@@ -9,7 +9,6 @@ const router = express.Router();
 
 // Public routes
 router.post("/login", AuthController.login);
-router.post("/logout", AuthController.logout);
 router.post("/refresh", AuthController.refresh);
 router.post("/forgot-password", AuthController.forgotPassword);
 
@@ -18,6 +17,7 @@ router.post("/sync-employee", internalOnly, AuthController.syncEmployee);
 
 // Protected routes (cần phiên đăng nhập)
 router.get("/me", sessionMiddleware, AuthController.me);
+router.post("/logout", sessionMiddleware, AuthController.logout);
 router.post("/change-password", sessionMiddleware, AuthController.changePassword);
 router.post("/reset-password", sessionMiddleware, AuthController.resetPassword);
 router.get("/devices", sessionMiddleware, AuthController.getDevices);

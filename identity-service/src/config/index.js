@@ -2,6 +2,19 @@
 
 require("dotenv").config();
 
+if (process.env.NODE_ENV === "production") {
+  const jwtSecret = process.env.JWT_SECRET;
+  const internalToken = process.env.INTERNAL_API_TOKEN;
+  if (!jwtSecret || jwtSecret.startsWith("dev_only_")) {
+    console.error("[FATAL] Production startup validation failed: JWT_SECRET is missing or using insecure default value.");
+    process.exit(1);
+  }
+  if (!internalToken || internalToken.startsWith("dev_only_")) {
+    console.error("[FATAL] Production startup validation failed: INTERNAL_API_TOKEN is missing or using insecure default value.");
+    process.exit(1);
+  }
+}
+
 function required(name, fallback) {
   const value = process.env[name] || fallback;
   return value;

@@ -4,6 +4,7 @@
   "private": true,
   "description": "HRM Enterprise Core Server — REST + SOAP payroll gateway (On-Premises SOA)",
   "scripts": {
+    "test:coverage": "for dir in api-gateway identity-service organization-service work-service payroll-service integration-service; do (echo \"\\n=== Coverage $dir ===\" && cd $dir && npm run test:coverage) || exit 1; done",
     "install:all": "for dir in api-gateway identity-service organization-service work-service payroll-service integration-service; do (echo \"\\n=== Installing $dir ===\" && cd $dir && npm install); done",
     "prisma:generate": "for dir in identity-service organization-service work-service payroll-service integration-service; do (echo \"\\n=== Prisma generate $dir ===\" && cd $dir && npx prisma generate); done",
     "prisma:deploy": "for dir in identity-service organization-service work-service payroll-service integration-service; do (echo \"\\n=== Prisma migrate deploy $dir ===\" && cd $dir && npx prisma migrate deploy) || exit 1; done",
@@ -12,5 +13,8 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "c8": "^12.0.0"
   }
 }

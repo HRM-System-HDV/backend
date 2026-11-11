@@ -285,7 +285,9 @@ async function deleteShift(id) {
     try {
       await prisma.shift.delete({ where: { id } });
       return true;
-    } catch (_) {}
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.shift.delete:", err);
+    }
   }
   const idx = memoryShifts.findIndex((s) => s.id === id);
   if (idx < 0) return false;
@@ -391,7 +393,9 @@ async function deleteRegistration(id) {
     try {
       await prisma.shiftRegistration.delete({ where: { id } });
       return true;
-    } catch (_) {}
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.shiftRegistration.delete:", err);
+    }
   }
   const idx = memoryRegistrations.findIndex((r) => r.id === id);
   if (idx < 0) return false;
@@ -461,32 +465,114 @@ async function updateConfig(payload) {
   return memoryConfig;
 }
 
-async function checkin({ employeeId, shiftId, time }) {
+async function syncShiftCheckin(prisma, employeeId, shiftId, checkInTime) {
+  if (prisma) {
+    try {
+      let shift = null;
+      if (shiftId) {
+        shift = await prisma.shift.findUnique({ where: { id: shiftId } }).catch(() => null);
+      }
+      if (!shift && employeeId) {
+        const today = todayVn();
+        const shifts = await prisma.shift.findMany({ where: { employeeId } }).catch(() => []);
+        shift = shifts.find((s) => dateKey(s.date) === dateKey(today)) || null;
+      }
+      if (shift) {
+        await prisma.shift.update({
+          where: { id: shift.id },
+          data: { checkIn: checkInTime, status: "đang làm" },
+        });
+      }
+    } catch (err) {
+      console.error("[work-service] Lỗi đồng bộ ca làm khi checkin (prisma):", err);
+    }
+  }
+
+  let memShift = null;
+  if (shiftId) {
+    memShift = memoryShifts.find((s) => s.id === shiftId);
+  }
+  if (!memShift && employeeId) {
+    const today = todayVn();
+    memShift = memoryShifts.find((s) => s.employeeId === employeeId && dateKey(s.date) === dateKey(today));
+  }
+  if (memShift) {
+    memShift.checkIn = checkInTime;
+    memShift.status = "đang làm";
+  }
+}
+
+async function syncShiftCheckout(prisma, employeeId, shiftId, checkOutTime) {
+  if (prisma) {
+    try {
+      let shift = null;
+      if (shiftId) {
+        shift = await prisma.shift.findUnique({ where: { id: shiftId } }).catch(() => null);
+      }
+      if (!shift && employeeId) {
+        const today = todayVn();
+        const shifts = await prisma.shift.findMany({ where: { employeeId } }).catch(() => []);
+        shift = shifts.find((s) => dateKey(s.date) === dateKey(today)) || null;
+      }
+      if (shift) {
+        await prisma.shift.update({
+          where: { id: shift.id },
+          data: { checkOut: checkOutTime, status: "hoàn thành" },
+        });
+      }
+    } catch (err) {
+      console.error("[work-service] Lỗi đồng bộ ca làm khi checkout (prisma):", err);
+    }
+  }
+
+  let memShift = null;
+  if (shiftId) {
+    memShift = memoryShifts.find((s) => s.id === shiftId);
+  }
+  if (!memShift && employeeId) {
+    const today = todayVn();
+    memShift = memoryShifts.find((s) => s.employeeId === employeeId && dateKey(s.date) === dateKey(today));
+  }
+  if (memShift) {
+    memShift.checkOut = checkOutTime;
+    memShift.status = "hoàn thành";
+  }
+}
+
+async function checkin({ employeeId, shiftId, time, checkinTime }) {
   const now = new Date();
+  const effectiveTime = time || checkinTime || `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
   const row = {
     id: uid("att"),
     employeeId,
     shiftId: shiftId || null,
     date: todayVn(),
-    checkIn: time || `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`,
+    checkIn: effectiveTime,
     checkOut: null,
     penaltyAmount: 0,
     penaltyNote: null,
     status: "present",
   };
   const prisma = database.getPrisma();
+  await syncShiftCheckin(prisma, employeeId, shiftId, row.checkIn);
   if (prisma) {
     try {
       return await prisma.attendance.create({ data: row });
-    } catch (_) {}
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.attendance.create:", err);
+    }
   }
   memoryAttendances.push(row);
   return row;
 }
 
-async function checkout({ employeeId, shiftId, time }) {
+async function checkout({ employeeId, shiftId, time, checkoutTime }) {
   const cfg = await getConfig();
   const prisma = database.getPrisma();
+  const now = new Date();
+  const serverTime = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  const out = time || checkoutTime || serverTime;
+  await syncShiftCheckout(prisma, employeeId, shiftId, out);
   // Tìm bản ghi hôm nay chưa checkout
   let target = null;
   if (prisma) {
@@ -494,7 +580,6 @@ async function checkout({ employeeId, shiftId, time }) {
       const rows = await prisma.attendance.findMany({ where: { employeeId }, orderBy: { createdAt: "desc" } });
       target = rows.find((r) => !r.checkOut) || null;
       if (target) {
-        const out = time || "17:30";
         // Phạt đơn giản: checkout rỗng -> về sớm nếu có giờ chuẩn? Giữ tối thiểu: không phạt khi đủ, phạt earlyLeave khi time < 17:00
         let penalty = 0;
         let status = "present";
@@ -505,10 +590,11 @@ async function checkout({ employeeId, shiftId, time }) {
         }
         return await prisma.attendance.update({ where: { id: target.id }, data: { checkOut: out, penaltyAmount: penalty, status } });
       }
-    } catch (_) {}
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.attendance.checkout:", err);
+    }
   }
   target = [...memoryAttendances].reverse().find((r) => r.employeeId === employeeId && !r.checkOut) || null;
-  const out = time || "17:30";
   if (!target) {
     const ci = await checkin({ employeeId, shiftId, time: "08:00" });
     target = ci;
@@ -553,7 +639,9 @@ async function listAttendance(query = {}) {
       }
       // Chấp nhận month=YYYY-MM hoặc MM/YYYY, so theo khóa YYYYMMDD.
       return rows.filter(matchDate);
-    } catch (_) {}
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.attendance.list:", err);
+    }
   }
   let out = [...memoryAttendances];
   if (query.employeeId) out = out.filter((a) => a.employeeId === query.employeeId);
@@ -627,7 +715,9 @@ async function deleteTask(id) {
     try {
       await prisma.task.delete({ where: { id } });
       deleted = true;
-    } catch (_) {}
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.task.delete:", err);
+    }
   }
   if (!deleted) {
     const idx = memoryTasks.findIndex((t) => t.id === id);
@@ -649,7 +739,9 @@ async function getShiftById(id) {
     try {
       const row = await prisma.shift.findUnique({ where: { id } });
       if (row) return row;
-    } catch (_) {}
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.shift.findUnique:", err);
+    }
   }
   return memoryShifts.find((s) => s.id === id) || null;
 }
@@ -660,7 +752,9 @@ async function getTaskById(id) {
     try {
       const row = await prisma.task.findUnique({ where: { id } });
       if (row) return row;
-    } catch (_) {}
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.task.findUnique:", err);
+    }
   }
   return memoryTasks.find((t) => t.id === id) || null;
 }
@@ -670,7 +764,9 @@ async function listTemplates() {
   if (prisma) {
     try {
       return await prisma.shiftTemplate.findMany({ orderBy: { createdAt: "asc" } });
-    } catch (_) {}
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.shiftTemplate.findMany:", err);
+    }
   }
   return memoryTemplates;
 }
@@ -680,7 +776,9 @@ async function createTemplate(payload) {
   if (prisma) {
     try {
       return await prisma.shiftTemplate.create({ data: payload });
-    } catch (_) {}
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.shiftTemplate.create:", err);
+    }
   }
   const row = { id: uid("st"), ...payload };
   memoryTemplates.push(row);
@@ -692,7 +790,9 @@ async function updateTemplate(id, payload) {
   if (prisma) {
     try {
       return await prisma.shiftTemplate.update({ where: { id }, data: payload });
-    } catch (_) {}
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.shiftTemplate.update:", err);
+    }
   }
   const idx = memoryTemplates.findIndex((t) => t.id === id);
   if (idx < 0) return null;
@@ -706,7 +806,9 @@ async function deleteTemplate(id) {
     try {
       await prisma.shiftTemplate.delete({ where: { id } });
       return true;
-    } catch (_) {}
+    } catch (err) {
+      console.error("[work-service] Lỗi prisma.shiftTemplate.delete:", err);
+    }
   }
   const idx = memoryTemplates.findIndex((t) => t.id === id);
   if (idx < 0) return false;

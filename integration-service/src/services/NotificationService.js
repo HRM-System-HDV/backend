@@ -50,22 +50,27 @@ async function findById(id) {
 
 async function nextNotificationId() {
   const prisma = database.getPrisma();
-  let max = 0;
   const prefix = "TB-";
+  if (prisma) {
+    try {
+      const result = await prisma.$queryRaw`SELECT nextval('notification_id_seq') as val`;
+      if (result && result.length > 0) {
+        const val = Number(result[0].val);
+        return `${prefix}${String(val).padStart(4, "0")}`;
+      }
+    } catch (err) {
+      console.error("[integration-service] Lỗi nextval('notification_id_seq'):", err);
+    }
+  }
+
+  let max = 0;
   const scan = (raw) => {
     const s = String(raw || "").trim().toUpperCase();
     if (!s.startsWith(prefix)) return;
     const n = Number(s.slice(prefix.length));
     if (Number.isInteger(n) && n > max) max = n;
   };
-  if (prisma) {
-    const rows = await prisma.notification
-      .findMany({ where: { id: { startsWith: prefix } }, select: { id: true } })
-      .catch(() => []);
-    rows.forEach((r) => scan(r.id));
-  } else {
-    memoryNotifications.forEach((r) => scan(r.id));
-  }
+  memoryNotifications.forEach((r) => scan(r.id));
   return `${prefix}${String(max + 1).padStart(4, "0")}`;
 }
 
@@ -145,11 +150,16 @@ async function deleteById(id) {
 let memorySettings = {};
 
 const DEFAULT_SETTINGS = {
-  remindCheckIn: true,
-  remindCheckOut: true,
-  remindShift: true,
-  notifyTask: true,
-  notifyLeave: true,
+  checkInBefore1Hour: true,
+  checkInBefore30Min: true,
+  checkInBefore10Min: true,
+  checkOutBefore10Min: true,
+  missedCheckOutAfter10Min: true,
+  missedCheckOutAfter30Min: true,
+  missedCheckOutAfter1Hour: true,
+  tabNotificationAlert: true,
+  soundEnabled: true,
+  vibrateEnabled: true,
 };
 
 // Chỉ nhận đúng các khóa boolean đã biết, bỏ qua field lạ client gửi lên.
@@ -194,4 +204,5 @@ module.exports = {
   deleteById,
   getSettings,
   updateSettings,
+  nextNotificationId,
 };

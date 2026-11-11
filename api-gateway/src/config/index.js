@@ -2,6 +2,14 @@
 
 require("dotenv").config();
 
+if (process.env.NODE_ENV === "production") {
+  const jwtSecret = process.env.JWT_SECRET;
+  if (!jwtSecret || jwtSecret.startsWith("dev_only_")) {
+    console.error("[FATAL] Production startup validation failed: JWT_SECRET is missing or using insecure default value.");
+    process.exit(1);
+  }
+}
+
 module.exports = {
   port: parseInt(process.env.PORT || "4000", 10),
   serviceName: process.env.SERVICE_NAME || "api-gateway",

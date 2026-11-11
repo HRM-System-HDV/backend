@@ -57,20 +57,12 @@ async function post(path, body) {
   return { res, body: await res.json() };
 }
 
-test("preview đếm đúng đơn đã xử lý và thông báo đã đọc quá hạn", async () => {
-  const { res, body } = await post("/api/archive/integration/preview", { months: 6 });
-  assert.equal(res.status, 200);
-  assert.ok(body.data.counts.request >= 2);
-  assert.ok(body.data.counts.notification >= 1);
-  assert.ok(body.data.cutoffDate);
-});
-
-test("preview/run chặn payload sai chuẩn", async () => {
-  let r = await post("/api/archive/integration/preview", { months: 6, cutoffDate: "2025-01-01" });
+test("run chặn payload sai chuẩn", async () => {
+  let r = await post("/api/archive/integration/run", { months: 6, cutoffDate: "2025-01-01" });
   assert.equal(r.res.status, 400);
-  r = await post("/api/archive/integration/preview", { months: 0 });
+  r = await post("/api/archive/integration/run", { months: 0 });
   assert.equal(r.res.status, 400);
-  r = await post("/api/archive/integration/preview", { cutoffDate: "khong-phai-ngay" });
+  r = await post("/api/archive/integration/run", { cutoffDate: "khong-phai-ngay" });
   assert.equal(r.res.status, 400);
   r = await post("/api/archive/integration/run", { months: 6, types: ["news"] });
   assert.equal(r.res.status, 400);
