@@ -48,6 +48,8 @@ model Payslip {
   netSalary   Float    @default(0)
   payoutId    String?
   status      String   @default("chưa chốt")
+  // Chi nhánh của nhân viên: dùng để ghim phạm vi đọc cho quản lý.
+  branchSlug  String?
   issuedAt    DateTime @default(now())
 
   @@unique([employeeId, month])

@@ -91,7 +91,14 @@ const cases = [
   ["POST", "/api/wifi-configs", "staff", false],
   ["POST", "/api/wifi-configs", "manager", false],
   ["PUT", "/api/wifi-configs/w1", "admin", true],
-  ["GET", "/api/wifi-configs/scan", "staff", true],
+  // Quét Wi-Fi trên máy chủ chạy lệnh hệ điều hành nên chỉ admin được gọi.
+  ["GET", "/api/wifi-configs/scan", "staff", false],
+  ["GET", "/api/wifi-configs/scan", "manager", false],
+  ["GET", "/api/wifi-configs/scan", "admin", true],
+  // Gửi thông báo là thao tác quản lý: staff bị chặn, manager/admin được.
+  ["POST", "/api/notifications", "staff", false],
+  ["POST", "/api/notifications", "manager", true],
+  ["POST", "/api/notifications", "admin", true],
   ["PUT", "/api/soap-config", "staff", false],
   ["PUT", "/api/soap-config", "manager", false],
   ["GET", "/api/soap-config", "staff", false],

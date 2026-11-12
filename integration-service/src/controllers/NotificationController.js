@@ -44,7 +44,9 @@ function notificationScope(req) {
   }
   const branchSlug = scopeBranchSlug(req);
   return {
-    employeeId: req.query.employeeId || userId || null,
+    // Manager không được đọc thông báo đích danh của người khác bằng
+    // ?employeeId=; phạm vi của manager là chi nhánh.
+    employeeId: role === "admin" ? req.query.employeeId || null : null,
     branchSlug,
     // Admin không chọn chi nhánh thì xem chéo toàn hệ thống, nên phải thấy cả
     // thông báo phạm vi chi nhánh (manager chỉ thấy đúng chi nhánh của mình).
@@ -111,9 +113,11 @@ async function createNotification(req, res, next) {
       shiftDate: normalizeShiftDate(req.body.shiftDate),
       shiftTime: req.body.shiftTime || null,
       shiftHours: req.body.shiftHours || null,
-      senderName: req.body.senderName || null,
-      senderRole: req.body.senderRole || null,
-      senderPhone: req.body.senderPhone || null,
+      // Người gửi lấy từ danh tính gateway ký, không lấy từ body: nếu tin body
+      // thì ai cũng có thể mạo tên người khác.
+      senderName: req.headers["x-user-name"] || req.headers["x-user-email"] || null,
+      senderRole: req.headers["x-user-role"] || null,
+      senderPhone: null,
     });
     return res.status(201).json({ data: created, message: "Gửi thông báo thành công" });
   } catch (error) {
@@ -168,6 +172,14 @@ async function deleteNotification(req, res, next) {
       });
     }
     if (!canAccessNotification(req, existing)) {
+      return forbiddenAccess(res);
+    }
+    // Xoá thông báo: chỉ chủ thông báo (người được gửi) hoặc admin. Manager
+    // không xoá được thông báo đích danh của người khác.
+    const role = req.headers["x-user-role"];
+    const userId = req.headers["x-user-id"];
+    const isOwner = userId && String(existing.targetEmployeeId || "") === String(userId);
+    if (role !== "admin" && !isOwner) {
       return forbiddenAccess(res);
     }
     await NotificationService.deleteById(req.params.id);

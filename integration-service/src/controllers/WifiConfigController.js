@@ -6,7 +6,16 @@ const errorCodes = require("../utils/errors");
 
 async function getAllWifiConfigs(req, res, next) {
   try {
-    const { branch } = req.query;
+    const role = req.headers["x-user-role"];
+    // Admin được lọc theo nhánh mình chọn; các vai trò khác bị ghim chi nhánh
+    // trong token nên không đọc được cấu hình Wi-Fi của chi nhánh khác.
+    let branch = null;
+    if (role === "admin") {
+      branch = req.query.branch || null;
+    } else {
+      branch = req.headers["x-branch-slug"] || null;
+      if (!branch) return res.status(200).json({ data: [] });
+    }
     const list = await WifiConfigService.findMany({ branch });
     return res.status(200).json({ data: list });
   } catch (error) {
@@ -64,7 +73,12 @@ async function updateWifiConfig(req, res, next) {
       });
     }
 
-    const updated = await WifiConfigService.update(id, req.body);
+    const updated = await WifiConfigService.update(id, {
+      ssid: req.body.ssid !== undefined ? String(req.body.ssid).trim() : undefined,
+      bssid: req.body.bssid !== undefined ? String(req.body.bssid).trim() : undefined,
+      branch: req.body.branch !== undefined ? String(req.body.branch).trim() : undefined,
+      status: req.body.status !== undefined ? req.body.status : undefined,
+    });
     return res.status(200).json({
       data: updated,
       message: "Cập nhật cấu hình Wi-Fi thành công",
@@ -96,6 +110,12 @@ async function deleteWifiConfig(req, res, next) {
 
 async function scanNearbyWifi(req, res, next) {
   try {
+    // Quét Wi-Fi trên máy chủ là thao tác quản trị hệ thống: chỉ admin.
+    if (req.headers["x-user-role"] !== "admin") {
+      return res.status(403).json({
+        error: { code: errorCodes.FORBIDDEN, message: "Bạn không có quyền quét Wi-Fi trên máy chủ" },
+      });
+    }
     const { exec } = require("child_process");
     // Chỉ trả SSID thật của máy chủ. BSSID/cường độ sóng/bảo mật không đo được
     // bằng networksetup nên không bịa ra; client tự hiển thị "không rõ".

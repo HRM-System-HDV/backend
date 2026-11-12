@@ -3,7 +3,7 @@
 // PayrollService (Flat 3-Tier Mẫu A): gộp PayrollRepository cũ + use cases,
 // gọi trực tiếp Prisma + fallback in-memory. Luồng Route -> Controller -> Service -> Prisma.
 const database = require("../config/database");
-const { InsufficientFundsError } = require("../utils/errors");
+const { InsufficientFundsError, InternalServerError } = require("../utils/errors");
 const OrgClient = require("../clients/OrgClient");
 const WorkClient = require("../clients/WorkClient");
 const { monthToQuery } = require("../validators/payrollValidator");
@@ -67,15 +67,21 @@ async function listBankAccounts() {
 
 async function updateBankAccount(id, payload) {
   const allowed = {};
-  for (const k of ["accountName", "bankName", "branch", "status", "balance", "isPrimary"]) {
+  // `balance` không nằm trong allowlist: số dư chỉ giảm khi có lệnh chi, không
+  // cho sửa tùy ý qua API.
+  for (const k of ["accountName", "bankName", "branch", "status", "isPrimary"]) {
     if (payload[k] !== undefined) allowed[k] = payload[k];
   }
   const prisma = database.getPrisma();
   if (prisma) {
     try {
-      // Chỉ cho phép tối đa 1 tài khoản primary.
+      // Chỉ cho phép tối đa 1 tài khoản primary: unset và set phải cùng một
+      // transaction để lỗi giữa chừng không làm mất primary cũ.
       if (allowed.isPrimary === true) {
-        await prisma.bankAccount.updateMany({ where: {}, data: { isPrimary: false } });
+        return await prisma.$transaction(async (tx) => {
+          await tx.bankAccount.updateMany({ where: {}, data: { isPrimary: false } });
+          return tx.bankAccount.update({ where: { id }, data: allowed });
+        });
       }
       return await prisma.bankAccount.update({ where: { id }, data: allowed });
     } catch (err) {
@@ -112,7 +118,10 @@ async function createBankAccount(payload) {
   if (prisma) {
     try {
       if (allowed.isPrimary === true) {
-        await prisma.bankAccount.updateMany({ where: {}, data: { isPrimary: false } });
+        return await prisma.$transaction(async (tx) => {
+          await tx.bankAccount.updateMany({ where: {}, data: { isPrimary: false } });
+          return tx.bankAccount.create({ data: allowed });
+        });
       }
       return await prisma.bankAccount.create({ data: allowed });
     } catch (err) {
@@ -176,10 +185,14 @@ async function debitAccount(accountNumber, amount) {
       throw err;
     }
     if (acc.balance < amount) throw new InsufficientFundsError("Số dư không đủ");
-    return await prisma.bankAccount.update({
-      where: { accountNumber },
-      data: { balance: acc.balance - amount },
+    // Trừ bằng điều kiện (balance >= amount) để hai lệnh chi song song không
+    // vượt số dư: read-then-write sẽ đọc trùng số dư cũ.
+    const updated = await prisma.bankAccount.updateMany({
+      where: { accountNumber, balance: { gte: amount } },
+      data: { balance: { decrement: amount } },
     });
+    if (!updated || updated.count === 0) throw new InsufficientFundsError("Số dư không đủ");
+    return await prisma.bankAccount.findUnique({ where: { accountNumber } });
   }
   const acc = memoryAccounts.find((a) => a.accountNumber === accountNumber);
   if (!acc) {
@@ -254,10 +267,14 @@ async function createPayout({ idempotencyKey, debitAccount: debitAcc, content, t
         if (acc.balance < totalAmount) {
           throw new InsufficientFundsError("Số dư không đủ");
         }
-        await tx.bankAccount.update({
-          where: { accountNumber: debitAcc },
-          data: { balance: acc.balance - totalAmount },
+        // Trừ có điều kiện để hai lệnh chi chạy song song không vượt số dư.
+        const debited = await tx.bankAccount.updateMany({
+          where: { accountNumber: debitAcc, balance: { gte: totalAmount } },
+          data: { balance: { decrement: totalAmount } },
         });
+        if (!debited || debited.count === 0) {
+          throw new InsufficientFundsError("Số dư không đủ");
+        }
 
         const nextId = await nextPayoutId();
         const row = {
@@ -322,11 +339,14 @@ async function listPayslips(query = {}) {
     const where = {};
     if (query.employeeId) where.employeeId = query.employeeId;
     if (query.month) where.month = query.month;
+    // Quản lý được ghim chi nhánh: chỉ thấy phiếu của chi nhánh mình.
+    if (query.branchSlug) where.branchSlug = query.branchSlug;
     return await prisma.payslip.findMany({ where, orderBy: { issuedAt: "desc" } });
   }
   return memoryPayslips.filter((p) => {
     if (query.employeeId && p.employeeId !== query.employeeId) return false;
     if (query.month && p.month !== query.month) return false;
+    if (query.branchSlug && String(p.branchSlug || "") !== String(query.branchSlug)) return false;
     return true;
   });
 }
@@ -351,7 +371,7 @@ async function findPayslipByEmployeeMonth(employeeId, month) {
   return memoryPayslips.find((p) => p.employeeId === employeeId && p.month === month) || null;
 }
 
-async function generatePayslip({ employeeId, month, baseSalary, bonus = 0, totalPenalty = 0 }) {
+async function generatePayslip({ employeeId, month, baseSalary, bonus = 0, totalPenalty = 0, branchSlug = null }) {
   const dup = await findPayslipByEmployeeMonth(employeeId, month);
   if (dup) {
     const err = new Error("Phiếu lương của nhân sự trong tháng đã tồn tại");
@@ -371,6 +391,8 @@ async function generatePayslip({ employeeId, month, baseSalary, bonus = 0, total
     totalPenalty,
     netSalary,
     status: "chưa chốt",
+    // Chi nhánh của nhân viên: dùng để ghim phạm vi đọc cho quản lý.
+    branchSlug: branchSlug || null,
     issuedAt: new Date(),
   };
   if (prisma) {
@@ -392,10 +414,20 @@ async function generatePayslip({ employeeId, month, baseSalary, bonus = 0, total
 
 // Tổng hợp phiếu lương: baseSalary (từ body hoặc organization-service) + bonus - totalPenalty (từ work-service).
 async function generatePayslipUseCase(payload) {
+  // Luôn cần hồ sơ nhân viên để lấy chi nhánh: quản lý chỉ được xem phiếu
+  // của chi nhánh mình nên phiếu phải lưu chi nhánh ngay từ đầu.
+  let employee = null;
+  try {
+    employee = await OrgClient.getEmployeeById(payload.employeeId);
+  } catch (err) {
+    console.error("[payroll-service] Không lấy được hồ sơ nhân viên:", err.message);
+    throw new InternalServerError("Không đọc được hồ sơ nhân sự từ organization-service", err);
+  }
+  const branchSlug = employee && employee.branchSlug ? employee.branchSlug : null;
+
   let baseSalary = payload.baseSalary;
-  if (baseSalary === undefined && payload.autoFetch) {
-    const emp = await OrgClient.getEmployeeById(payload.employeeId);
-    baseSalary = Number(emp.baseSalary || 0);
+  if (baseSalary === undefined && employee) {
+    baseSalary = Number(employee.baseSalary || 0);
   }
   if (baseSalary === undefined) {
     const err = new Error("Thiếu lương cơ bản");
@@ -424,6 +456,7 @@ async function generatePayslipUseCase(payload) {
     baseSalary: Number(baseSalary),
     bonus: Number(payload.bonus || 0),
     totalPenalty,
+    branchSlug,
   });
 }
 

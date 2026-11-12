@@ -35,6 +35,11 @@ const rules = [
   // cấu hình Wi-Fi và cấu hình SOAP là tính năng hệ thống, chỉ admin.
   { methods: WRITE, path: /^\/api\/(news|regulations)(\/|$)/, roles: MANAGERS },
   { methods: WRITE, path: /^\/api\/(wifi-configs|soap-config)(\/|$)/, roles: ["admin"] },
+  // Quét Wi-Fi trên máy chủ chạy lệnh hệ điều hành: chỉ admin.
+  { methods: ["GET"], path: /^\/api\/wifi-configs\/scan$/, roles: ["admin"] },
+  // Gửi thông báo là thao tác quản lý: nhân viên không tự bắn thông báo cho
+  // người khác (và không mạo được tên người gửi).
+  { methods: ["POST"], path: /^\/api\/notifications(\/|$)/, roles: MANAGERS },
   // Đọc cấu hình SOAP lộ endpointUrl/securityMode/allowedIPs/certExpiry nên để
   // admin; WRITE đã có luật riêng ở trên, GET thì hiện không luật nào chặn.
   { methods: ["GET"], path: /^\/api\/soap-config(\/|$)/, roles: ["admin"] },

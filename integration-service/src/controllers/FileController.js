@@ -7,9 +7,29 @@ function publicIdOf(req) {
   return req.params[0] || "";
 }
 
+// Đọc ảnh (CCCD, avatar) là dữ liệu nhạy cảm: chỉ chủ file, admin hoặc quản lý
+// cùng chi nhánh được xem. File không có chi nhánh (đã tải lên trước khi có
+// cột branchSlug) chỉ admin và chủ file xem được.
+function assertCanReadFile(req, asset) {
+  const role = req.headers["x-user-role"];
+  const userId = req.headers["x-user-id"];
+  if (role === "admin") return;
+  if (userId && asset.uploadedBy && String(asset.uploadedBy) === String(userId)) return;
+  if (role === "manager") {
+    const own = String(req.headers["x-branch-slug"] || "").toLowerCase();
+    const target = String(asset.branchSlug || "").toLowerCase();
+    if (own && target && own === target) return;
+  }
+  const err = new Error("Bạn không có quyền xem tệp này");
+  err.status = 403;
+  err.code = "FORBIDDEN";
+  throw err;
+}
+
 async function getFile(req, res, next) {
   try {
     const { asset, bytes } = await FileService.getByPublicId(publicIdOf(req));
+    assertCanReadFile(req, asset);
     res.setHeader("Content-Type", asset.mime);
     res.setHeader("Content-Length", bytes);
     res.setHeader("Cache-Control", "private, max-age=86400");

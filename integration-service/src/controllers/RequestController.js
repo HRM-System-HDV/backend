@@ -40,6 +40,24 @@ function isPrivileged(req) {
   return role === "admin" || role === "manager";
 }
 
+// Đơn là dữ liệu của chi nhánh: quản lý chỉ đọc/duyệt/xoá được đơn thuộc
+// chi nhánh của mình. Nhân viên chỉ thấy đơn của mình (hoặc đơn được nhờ).
+// Admin thì không giới hạn. Trả về thông điệp lỗi hoặc null khi được phép.
+function requestAccessError(req, row, action) {
+  if (!row) return null;
+  const role = req.headers["x-user-role"];
+  const uid = callerId(req);
+  if (role === "admin") return null;
+  if (role === "manager") {
+    const own = String(req.headers["x-branch-slug"] || "").toLowerCase();
+    const target = String(row.branchSlug || "").toLowerCase();
+    if (own && target && own === target) return null;
+    return `Bạn không có quyền ${action} yêu cầu ngoài chi nhánh của mình`;
+  }
+  if (uid && (row.employeeId === uid || row.targetEmployeeId === uid)) return null;
+  return `Bạn không có quyền ${action} yêu cầu này`;
+}
+
 async function listRequests(req, res, next) {
   try {
     const rows = await RequestService.findMany(requestScope(req));
@@ -57,10 +75,10 @@ async function getRequestById(req, res, next) {
         error: { code: errorCodes.NOT_FOUND, message: "Không tìm thấy yêu cầu" },
       });
     }
-    const uid = callerId(req);
-    if (uid && !isPrivileged(req) && row.employeeId !== uid) {
+    const accessError = requestAccessError(req, row, "xem");
+    if (accessError) {
       return res.status(403).json({
-        error: { code: errorCodes.FORBIDDEN, message: "Bạn không có quyền xem yêu cầu này" },
+        error: { code: errorCodes.FORBIDDEN, message: accessError },
       });
     }
     return res.status(200).json({ data: row, message: "Thao tác thành công" });
@@ -105,6 +123,18 @@ async function createRequest(req, res, next) {
 
 async function reviewRequest(req, res, approved) {
   try {
+    const row = await RequestService.findById(req.params.id);
+    if (!row) {
+      return res.status(404).json({
+        error: { code: errorCodes.NOT_FOUND, message: "Không tìm thấy yêu cầu" },
+      });
+    }
+    const accessError = requestAccessError(req, row, approved ? "duyệt" : "từ chối");
+    if (accessError) {
+      return res.status(403).json({
+        error: { code: errorCodes.FORBIDDEN, message: accessError },
+      });
+    }
     const updated = approved
       ? await RequestService.approveRequest(req.params.id, {
           reviewedBy: req.body.reviewedBy,
@@ -179,6 +209,12 @@ async function deleteRequest(req, res, next) {
     if (!canDeleteRequest(row.status)) {
       return res.status(400).json({
         error: { code: errorCodes.VALIDATION_ERROR, message: "Chỉ được xóa yêu cầu đang chờ xử lý" },
+      });
+    }
+    const accessError = requestAccessError(req, row, "xóa");
+    if (accessError) {
+      return res.status(403).json({
+        error: { code: errorCodes.FORBIDDEN, message: accessError },
       });
     }
     await RequestService.deleteById(req.params.id);

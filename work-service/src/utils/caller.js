@@ -38,9 +38,31 @@ function scopeOwnQuery(query, caller) {
   return { ...query, employeeId: requireUserId(caller) };
 }
 
+// Nhân viên thấy nhiệm vụ giao riêng cho mình, cộng thêm nhiệm vụ theo ca
+// (sourceType "shift") của chi nhánh mình: nhiệm vụ theo ca không có một
+// người nhận cụ thể (assignedTo = null) nên giao cho cả ca.
 function scopeTaskQuery(query, caller) {
   if (isPrivileged(caller)) return { ...query };
-  return { ...query, assignedTo: requireUserId(caller) };
+  const userId = requireUserId(caller);
+  return {
+    ...query,
+    assignedTo: userId,
+    includeShiftTasksOfBranch: caller.branchSlug || null,
+  };
+}
+
+// Quản lý chỉ được thao tác bản ghi thuộc chi nhánh của mình. Admin thì
+// không giới hạn. Không có chi nhánh trong token thì quản lý không được
+// thao tác bản ghi nào.
+function assertBranchScope(row, caller, message) {
+  if (!row) return;
+  if (caller.role === "admin") return;
+  if (caller.role !== "manager") return;
+  const own = String(caller.branchSlug || "").toLowerCase();
+  const target = String(row.branchSlug || "").toLowerCase();
+  if (!own || !target || own !== target) {
+    throw new ForbiddenError(message);
+  }
 }
 
 // Ca làm là lịch chung của chi nhánh: nhân viên cần thấy để đăng ký, nhưng chỉ
@@ -58,4 +80,5 @@ module.exports = {
   scopeOwnQuery,
   scopeTaskQuery,
   scopeBranchQuery,
+  assertBranchScope,
 };

@@ -56,6 +56,8 @@ async function createNews(req, res, next) {
       tagTone: req.body.tagTone || "primary",
       pinned: Boolean(req.body.pinned),
       branch: req.body.branch ? req.body.branch.trim() : "Toàn công ty",
+      // Người đăng lấy từ danh tính gateway ký; không tin body.
+      author: req.headers["x-user-name"] || req.headers["x-user-email"] || null,
     });
 
     return res.status(201).json({
@@ -77,8 +79,11 @@ async function updateNews(req, res, next) {
       });
     }
 
-    const payload = { ...req.body };
-    delete payload.author;
+    // Chỉ nhận field đã biết: client gửi field lạ sẽ làm Prisma lỗi 500.
+    const payload = {};
+    for (const key of ["title", "summary", "content", "tag", "tagTone", "pinned", "branch"]) {
+      if (req.body[key] !== undefined) payload[key] = req.body[key];
+    }
     if (payload.date !== undefined) payload.date = formatDateVN(payload.date);
     const updated = await NewsService.update(id, payload);
     return res.status(200).json({

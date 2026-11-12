@@ -43,13 +43,14 @@ function proxyTo(pathFilter, target, label) {
       proxyReq: (proxyReq, req) => {
         // Client có thể tự gửi x-user-* để giả danh, nhất là ở tuyến public nơi
         // req.user chưa được set. Luôn xóa trước rồi mới gắn danh tính đã verify.
-        for (const h of ["x-user-id", "x-user-email", "x-user-role", "x-branch-slug"]) {
+        for (const h of ["x-user-id", "x-user-email", "x-user-name", "x-user-role", "x-branch-slug"]) {
           proxyReq.removeHeader(h);
         }
         // Chuyển danh tính đã verify sang service phía sau, service không cần re-verify.
         if (req.user) {
           if (req.user.userId) proxyReq.setHeader("x-user-id", String(req.user.userId));
           if (req.user.email) proxyReq.setHeader("x-user-email", String(req.user.email));
+          if (req.user.name) proxyReq.setHeader("x-user-name", String(req.user.name));
           if (req.user.role) proxyReq.setHeader("x-user-role", String(req.user.role));
           if (req.user.branchSlug) proxyReq.setHeader("x-branch-slug", String(req.user.branchSlug));
         }

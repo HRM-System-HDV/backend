@@ -1,6 +1,7 @@
 "use strict";
 
-const VALID_TYPES = ["leave", "overtime", "advance", "shift_swap", "work_supplement", "other"];
+// 4 loại yêu cầu được hỗ trợ: nghỉ phép, tạm ứng, đổi ca, bổ sung công.
+const VALID_TYPES = ["leave", "advance", "shift_swap", "work_supplement"];
 const VALID_STATUSES = ["pending", "approved", "rejected"];
 
 function validateCreateRequest(payload) {
@@ -31,7 +32,7 @@ function validateCreateRequest(payload) {
     } else if (payload.targetEmployeeId === payload.employeeId) {
       errors.push("Không thể gửi yêu cầu cho chính mình");
     }
-    if (payload.type !== "overtime" && payload.type !== "shift_swap") {
+    if (payload.type !== "shift_swap") {
       errors.push("Chỉ đơn làm thay / đổi ca mới có nhân viên nhận yêu cầu");
     }
   }

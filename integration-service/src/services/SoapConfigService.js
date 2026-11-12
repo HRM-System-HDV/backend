@@ -15,7 +15,8 @@ let memoryConfig = {
   serviceName: "PayrollDirectDisbursementService",
   port: 8443,
   securityMode: "TransportWithMessageCredential (mTLS + X.509)",
-  allowedIPs: ["203.162.10.45", "118.70.124.8", "123.30.55.19", "14.161.32.90"],
+  // Không bịa danh sách IP: danh sách này phải do quản trị viên cấu hình.
+  allowedIPs: [],
   // Ba trường dưới đây là KẾT QUẢ đo, không phải thuộc tính cấu hình: để "unknown"/null
   // vì chưa có lần ping nào. Bộ mặc định cũ ("healthy", "128ms") làm màn hình Ngân hàng
   // hiển thị độ khoẻ bịa khi CSDL chưa có dòng.
@@ -32,7 +33,15 @@ async function getConfig() {
     try {
       const row = await prisma.soapGatewayConfig.findUnique({ where: { id: "default" } });
       if (row) return row;
-    } catch (_) {}
+    } catch (err) {
+      // Có Prisma mà đọc lỗi thì phải nổ lỗi: trả về cấu hình trong bộ nhớ sẽ
+      // khiến màn hình hiển thị cấu hình giả như thật.
+      console.error("[integration-service] Lỗi đọc cấu hình SOAP:", err.message);
+      const error = new Error("Không đọc được cấu hình SOAP từ CSDL");
+      error.status = 500;
+      error.code = "INTERNAL_SERVER_ERROR";
+      throw error;
+    }
   }
   return memoryConfig;
 }
@@ -63,7 +72,14 @@ async function updateConfig(payload) {
         update: allowed,
         create: { ...memoryConfig, ...allowed },
       });
-    } catch (_) {}
+    } catch (err) {
+      // Ghi hỏng thì phải nổ lỗi, không ghi vào bộ nhớ rồi báo thành công.
+      console.error("[integration-service] Lỗi lưu cấu hình SOAP:", err.message);
+      const error = new Error("Không lưu được cấu hình SOAP vào CSDL");
+      error.status = 500;
+      error.code = "INTERNAL_SERVER_ERROR";
+      throw error;
+    }
   }
   memoryConfig = { ...memoryConfig, ...allowed };
   return memoryConfig;

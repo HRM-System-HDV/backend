@@ -10,53 +10,12 @@ function serverError(message) {
   return err;
 }
 
+// Nhật ký thao tác chỉ ghi việc thật. Bản ghi khởi tạo chỉ đánh dấu hệ thống
+// vừa được dựng, không mô phỏng thao tác của người dùng (nhìn như nhật ký
+// thật thì giả).
 const INITIAL_BACKLOGS = [
   {
     id: "bl-init-1",
-    timestamp: "04/11/2026 22:15:30",
-    userName: "Trần Minh Tuấn (Admin)",
-    userRole: "admin",
-    action: "UPDATE",
-    actionLabel: "Chỉnh sửa",
-    module: "Ca kíp",
-    targetName: "Khung ca mẫu",
-    description: "Cập nhật giờ bắt đầu/kết thúc ca sáng thành chuẩn 24h",
-  },
-  {
-    id: "bl-init-2",
-    timestamp: "04/11/2026 21:40:12",
-    userName: "Trần Minh Tuấn (Admin)",
-    userRole: "admin",
-    action: "UPDATE",
-    actionLabel: "Lưu cấu hình",
-    module: "Chấm công",
-    targetName: "Quy tắc phạt trễ / đổi ca",
-    description: "Lưu cấu hình chấm công vào hệ thống cơ sở dữ liệu",
-  },
-  {
-    id: "bl-init-3",
-    timestamp: "04/11/2026 18:38:00",
-    userName: "Trần Minh Tuấn (Admin)",
-    userRole: "admin",
-    action: "CREATE",
-    actionLabel: "Thêm mới",
-    module: "Nhiệm vụ",
-    targetName: "Công việc #123",
-    description: "Giao việc kiểm tra thiết bị cho nhân sự",
-  },
-  {
-    id: "bl-init-4",
-    timestamp: "04/11/2026 16:20:45",
-    userName: "Trần Minh Tuấn (Admin)",
-    userRole: "admin",
-    action: "CREATE",
-    actionLabel: "Phân công",
-    module: "Phân ca",
-    targetName: "Ca Chiều (14:00 - 22:00)",
-    description: "Phân ca làm việc cho nhân sự chi nhánh HN-1",
-  },
-  {
-    id: "bl-init-5",
     timestamp: "04/11/2026 14:10:00",
     userName: "Hệ thống",
     userRole: "system",

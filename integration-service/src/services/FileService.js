@@ -75,7 +75,7 @@ function dimensionsOf(buffer) {
   }
 }
 
-async function upload(dataUrl, folder, uploadedBy = null) {
+async function upload(dataUrl, folder, uploadedBy = null, branchSlug = null) {
   const safeFolder = validateFolder(folder);
   const { mime, buffer, ext, format } = parseDataUrl(dataUrl);
   const publicId = `${safeFolder}/${crypto.randomUUID()}`;
@@ -91,6 +91,7 @@ async function upload(dataUrl, folder, uploadedBy = null) {
     width,
     height,
     uploadedBy: uploadedBy || null,
+    branchSlug: branchSlug || null,
     createdAt: new Date(),
     deletedAt: null,
   });

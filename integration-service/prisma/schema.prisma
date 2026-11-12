@@ -12,7 +12,7 @@ datasource db {
 
 model Request {
   id               String   @id @default(cuid())
-  type             String   // leave | overtime | advance | shift_swap | work_supplement | other
+  type             String   // leave | advance | shift_swap | work_supplement
   employeeId       String
   targetEmployeeId String?  // Nhân viên được nhờ làm thay / đổi ca (người phản hồi)
   branchSlug       String?
@@ -97,6 +97,7 @@ model News {
   tagTone   String   @default("primary") // danger | warning | success | primary | gray
   pinned    Boolean  @default(false)
   branch    String   @default("Toàn công ty")
+  author    String?  // người đăng (lấy từ danh tính gateway ký)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -161,6 +162,7 @@ model FileAsset {
   width       Int       @default(0)
   height      Int       @default(0)
   uploadedBy  String?   // x-user-id do gateway xác thực
+  branchSlug  String?   // chi nhánh của người upload (x-branch-slug): quản lý chỉ xem được file cùng chi nhánh
   createdAt   DateTime  @default(now())
   deletedAt   DateTime? // xóa mềm để đối soát
 

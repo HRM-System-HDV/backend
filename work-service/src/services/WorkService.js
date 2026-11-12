@@ -622,6 +622,12 @@ async function syncShiftCheckin(prisma, employeeId, shiftId, checkInTime) {
         shift = shifts.find((s) => dateKey(s.date) === dateKey(today)) || null;
       }
       if (shift) {
+        // Ca phải thuộc đúng nhân viên đang chấm công, nếu không thì một ca
+        // của người khác có thể bị ghi giờ vào/ra từ xa. Dữ liệu ca luôn có
+        // employeeId; dòng không có employeeId là dữ liệu cũ nên bỏ qua.
+        if (shift.employeeId && String(shift.employeeId) !== String(employeeId)) {
+          throw new ForbiddenError("Ca làm việc không thuộc nhân viên này");
+        }
         resolved = shift;
         await prisma.shift.update({
           where: { id: shift.id },
@@ -629,6 +635,7 @@ async function syncShiftCheckin(prisma, employeeId, shiftId, checkInTime) {
         });
       }
     } catch (err) {
+      if (err instanceof ForbiddenError) throw err;
       console.error("[work-service] Lỗi đồng bộ ca làm khi checkin (prisma):", err);
     }
   }
@@ -642,6 +649,9 @@ async function syncShiftCheckin(prisma, employeeId, shiftId, checkInTime) {
     memShift = memoryShifts.find((s) => s.employeeId === employeeId && dateKey(s.date) === dateKey(today));
   }
   if (memShift) {
+    if (memShift.employeeId && String(memShift.employeeId) !== String(employeeId)) {
+      throw new ForbiddenError("Ca làm việc không thuộc nhân viên này");
+    }
     memShift.checkIn = checkInTime;
     memShift.status = "đang làm";
     resolved = resolved || memShift;
@@ -662,12 +672,16 @@ async function syncShiftCheckout(prisma, employeeId, shiftId, checkOutTime) {
         shift = shifts.find((s) => dateKey(s.date) === dateKey(today)) || null;
       }
       if (shift) {
+        if (shift.employeeId && String(shift.employeeId) !== String(employeeId)) {
+          throw new ForbiddenError("Ca làm việc không thuộc nhân viên này");
+        }
         await prisma.shift.update({
           where: { id: shift.id },
           data: { checkOut: checkOutTime, status: "hoàn thành" },
         });
       }
     } catch (err) {
+      if (err instanceof ForbiddenError) throw err;
       console.error("[work-service] Lỗi đồng bộ ca làm khi checkout (prisma):", err);
     }
   }
@@ -681,6 +695,9 @@ async function syncShiftCheckout(prisma, employeeId, shiftId, checkOutTime) {
     memShift = memoryShifts.find((s) => s.employeeId === employeeId && dateKey(s.date) === dateKey(today));
   }
   if (memShift) {
+    if (memShift.employeeId && String(memShift.employeeId) !== String(employeeId)) {
+      throw new ForbiddenError("Ca làm việc không thuộc nhân viên này");
+    }
     memShift.checkOut = checkOutTime;
     memShift.status = "hoàn thành";
   }
@@ -860,8 +877,21 @@ async function listTasks(query = {}) {
       if (query.branchSlug) {
         where.branchSlug = { equals: query.branchSlug, mode: "insensitive" };
       }
-      if (query.assignedTo) where.assignedTo = query.assignedTo;
       if (query.status) where.status = query.status;
+      if (query.includeShiftTasksOfBranch) {
+        // Nhiệm vụ giao riêng cho tôi + nhiệm vụ theo ca của chi nhánh tôi
+        // (nhiệm vụ theo ca không có một người nhận cụ thể).
+        where.OR = [
+          { assignedTo: query.assignedTo },
+          {
+            assignedTo: null,
+            sourceType: "shift",
+            branchSlug: { equals: query.includeShiftTasksOfBranch, mode: "insensitive" },
+          },
+        ];
+      } else if (query.assignedTo) {
+        where.assignedTo = query.assignedTo;
+      }
       return await prisma.task.findMany({ where, orderBy: { createdAt: "desc" } });
     } catch (err) {
       console.error("[work-service] Lỗi prisma.task.findMany:", err);
@@ -870,8 +900,17 @@ async function listTasks(query = {}) {
   }
   return memoryTasks.filter((t) => {
     if (query.branchSlug && (t.branchSlug || "").toLowerCase() !== query.branchSlug.toLowerCase()) return false;
-    if (query.assignedTo && t.assignedTo !== query.assignedTo) return false;
     if (query.status && t.status !== query.status) return false;
+    if (query.includeShiftTasksOfBranch) {
+      const mine = query.assignedTo && t.assignedTo === query.assignedTo;
+      const shiftTask =
+        !t.assignedTo &&
+        t.sourceType === "shift" &&
+        (t.branchSlug || "").toLowerCase() === String(query.includeShiftTasksOfBranch).toLowerCase();
+      if (!mine && !shiftTask) return false;
+    } else if (query.assignedTo && t.assignedTo !== query.assignedTo) {
+      return false;
+    }
     return true;
   });
 }
@@ -1008,10 +1047,15 @@ async function createTemplate(payload) {
 }
 
 async function updateTemplate(id, payload) {
+  // Chỉ nhận field đã biết: client gửi field lạ sẽ làm Prisma lỗi 500.
+  const data = {};
+  for (const k of ["name", "startTime", "endTime"]) {
+    if (payload[k] !== undefined) data[k] = payload[k];
+  }
   const prisma = database.getPrisma();
   if (prisma) {
     try {
-      return await prisma.shiftTemplate.update({ where: { id }, data: payload });
+      return await prisma.shiftTemplate.update({ where: { id }, data });
     } catch (err) {
       // P2025 = không có dòng để sửa -> 404; lỗi DB khác phải ném lên 500.
       if (String(err.code) === "P2025") return null;
@@ -1021,7 +1065,7 @@ async function updateTemplate(id, payload) {
   }
   const idx = memoryTemplates.findIndex((t) => t.id === id);
   if (idx < 0) return null;
-  memoryTemplates[idx] = { ...memoryTemplates[idx], ...payload };
+  memoryTemplates[idx] = { ...memoryTemplates[idx], ...data };
   return memoryTemplates[idx];
 }
 

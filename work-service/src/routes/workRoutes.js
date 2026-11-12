@@ -18,7 +18,6 @@ router.get("/shifts", WorkController.listShifts);
 router.post("/shifts", WorkController.createShift);
 router.put("/shifts/:id", WorkController.updateShift);
 router.delete("/shifts/:id", WorkController.deleteShift);
-router.get("/shifts/:id", WorkController.getShift);
 router.post("/shifts/:id/assign", WorkController.assignShift);
 
 // Shift templates (khung ca mẫu)
@@ -39,6 +38,5 @@ router.get("/tasks", WorkController.listTasks);
 router.post("/tasks", WorkController.createTask);
 router.put("/tasks/:id", WorkController.updateTask);
 router.delete("/tasks/:id", WorkController.deleteTask);
-router.get("/tasks/:id", WorkController.getTask);
 
 module.exports = router;

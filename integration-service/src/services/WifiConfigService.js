@@ -47,13 +47,18 @@ async function create(data) {
 
 async function update(id, data) {
   const prisma = database.getPrisma();
+  // Chỉ nhận field đã biết: client gửi field lạ sẽ làm Prisma lỗi 500.
+  const allowed = {};
+  for (const k of ["ssid", "bssid", "branch", "status"]) {
+    if (data[k] !== undefined) allowed[k] = data[k];
+  }
   if (!prisma) {
     const idx = memoryWifi.findIndex((w) => w.id === id);
     if (idx === -1) return null;
-    memoryWifi[idx] = { ...memoryWifi[idx], ...data, updatedAt: new Date() };
+    memoryWifi[idx] = { ...memoryWifi[idx], ...allowed, updatedAt: new Date() };
     return memoryWifi[idx];
   }
-  return prisma.wifiConfig.update({ where: { id }, data });
+  return prisma.wifiConfig.update({ where: { id }, data: allowed });
 }
 
 async function deleteById(id) {

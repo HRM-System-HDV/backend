@@ -321,6 +321,9 @@ async function loginUseCase({ email, password }, req) {
   const payload = {
     userId: user.id,
     email: user.email,
+    // Tên hiển thị đi kèm token: service phía sau dùng làm "người gửi"
+    // (thông báo, tin tức) mà không tin body của client.
+    name: user.name || null,
     role: user.role,
     branchSlug: user.role === "admin" ? null : user.branchSlug,
   };
@@ -473,6 +476,7 @@ async function refreshTokenUseCase({ refreshToken }) {
   const tokenPayload = {
     userId: user.id,
     email: user.email,
+    name: user.name || null,
     role: user.role,
     branchSlug: user.role === "admin" ? null : user.branchSlug,
   };
@@ -585,10 +589,24 @@ async function syncEmployeeUseCase({ employee, action = "upsert" }) {
   }
 
   // action === "upsert"
-  const rawRole = (employee.systemRole || employee.role || "staff").toString().toLowerCase();
+  // Vai trò hệ thống là enum (admin|manager|staff) nên được ưu tiên; chuỗi
+  // "role" chỉ là chức danh tự do, so chuỗi nó sẽ biến "Nhân viên quản lý
+  // chất lượng" thành quản lý.
+  const SYSTEM_ROLES = new Set(["admin", "manager", "staff"]);
+  const systemRole = (employee.systemRole || "").toString().trim().toLowerCase();
+  const rawRole = (employee.role || "").toString().trim().toLowerCase();
   let role = "staff";
-  if (rawRole.includes("admin") || rawRole === "admin") role = "admin";
-  else if (rawRole.includes("quản lý") || rawRole.includes("manager") || rawRole === "manager") role = "manager";
+  if (SYSTEM_ROLES.has(systemRole)) {
+    role = systemRole;
+  } else if (rawRole === "admin") {
+    role = "admin";
+  } else if (rawRole === "manager") {
+    role = "manager";
+  } else if (rawRole.includes("quản trị") || rawRole.includes("admin")) {
+    role = "admin";
+  } else if (rawRole.includes("quản lý") || rawRole.includes("manager")) {
+    role = "manager";
+  }
 
   let roleTitle = employee.role || "Nhân viên";
   if (role === "admin") roleTitle = "Quản trị viên";

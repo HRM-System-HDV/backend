@@ -10,7 +10,21 @@ const {
   scopeOwnQuery,
   scopeTaskQuery,
   scopeBranchQuery,
+  assertBranchScope,
 } = require("../utils/caller");
+
+// Quản lý chỉ được chấm công hộ cho ca thuộc chi nhánh của mình. Khi không
+// có shiftId thì không có dữ liệu để đối chiếu nên giữ hành vi cũ.
+async function assertAttendanceBranchScope(shiftId, caller) {
+  if (caller.role !== "manager" || !shiftId) return;
+  const shift = await WorkService.getShiftById(shiftId);
+  if (!shift) return;
+  assertBranchScope(
+    shift,
+    caller,
+    "Quản lý chỉ được chấm công cho ca thuộc chi nhánh của mình",
+  );
+}
 
 async function listShifts(req, res, next) {
   try {
@@ -25,7 +39,16 @@ async function createShift(req, res, next) {
   try {
     const errors = validateShift(req.body);
     if (errors.length) throw new ValidationError(errors.join("; "));
-    const row = await WorkService.createShift(req.body);
+    const caller = callerFrom(req);
+    const payload = { ...req.body };
+    if (caller.role === "manager") {
+      // Quản lý chỉ được tạo ca trong chi nhánh của mình.
+      if (!caller.branchSlug) {
+        throw new ForbiddenError("Tài khoản quản lý chưa được gán chi nhánh");
+      }
+      payload.branchSlug = caller.branchSlug;
+    }
+    const row = await WorkService.createShift(payload);
     return res.status(201).json({ data: row, message: "Thao tác thành công" });
   } catch (e) {
     return next(e);
@@ -34,6 +57,12 @@ async function createShift(req, res, next) {
 
 async function updateShift(req, res, next) {
   try {
+    const caller = callerFrom(req);
+    if (caller.role === "manager") {
+      const current = await WorkService.getShiftById(req.params.id);
+      if (!current) throw new NotFoundError("Không tìm thấy ca làm việc");
+      assertBranchScope(current, caller, "Quản lý chỉ được sửa ca thuộc chi nhánh của mình");
+    }
     const row = await WorkService.updateShift(req.params.id, req.body);
     if (!row) throw new NotFoundError("Không tìm thấy ca làm việc");
     return res.status(200).json({ data: row, message: "Thao tác thành công" });
@@ -44,6 +73,12 @@ async function updateShift(req, res, next) {
 
 async function deleteShift(req, res, next) {
   try {
+    const caller = callerFrom(req);
+    if (caller.role === "manager") {
+      const current = await WorkService.getShiftById(req.params.id);
+      if (!current) throw new NotFoundError("Không tìm thấy ca làm việc");
+      assertBranchScope(current, caller, "Quản lý chỉ được xóa ca thuộc chi nhánh của mình");
+    }
     const ok = await WorkService.deleteShift(req.params.id);
     if (!ok) throw new NotFoundError("Không tìm thấy ca làm việc");
     return res.status(200).json({ data: { ok: true }, message: "Thao tác thành công" });
@@ -55,6 +90,12 @@ async function deleteShift(req, res, next) {
 async function assignShift(req, res, next) {
   try {
     if (!req.body.employeeId) throw new ValidationError("Thiếu employeeId để phân công");
+    const caller = callerFrom(req);
+    if (caller.role === "manager") {
+      const current = await WorkService.getShiftById(req.params.id);
+      if (!current) throw new NotFoundError("Không tìm thấy ca làm việc");
+      assertBranchScope(current, caller, "Quản lý chỉ được phân công ca thuộc chi nhánh của mình");
+    }
     const row = await WorkService.updateShift(req.params.id, { employeeId: req.body.employeeId });
     if (!row) throw new NotFoundError("Không tìm thấy ca làm việc");
     return res.status(200).json({ data: row, message: "Phân công ca thành công" });
@@ -121,7 +162,9 @@ async function deleteRegistration(req, res, next) {
 
 async function checkin(req, res, next) {
   try {
-    const body = assertSelfEmployee(req.body, callerFrom(req));
+    const caller = callerFrom(req);
+    const body = assertSelfEmployee(req.body, caller);
+    await assertAttendanceBranchScope(body.shiftId, caller);
     const errors = validateAttendance(body);
     if (errors.length) throw new ValidationError(errors.join("; "));
     const row = await WorkService.checkin(body);
@@ -139,6 +182,7 @@ async function checkout(req, res, next) {
   try {
     const caller = callerFrom(req);
     const body = assertSelfEmployee(req.body, caller);
+    await assertAttendanceBranchScope(body.shiftId, caller);
     const errors = validateAttendance(body);
     if (errors.length) throw new ValidationError(errors.join("; "));
     const row = await WorkService.checkout({ ...body, caller });
@@ -214,7 +258,15 @@ async function updateTask(req, res, next) {
     if (!isPrivileged(caller)) {
       const task = await WorkService.getTaskById(req.params.id);
       if (!task) throw new NotFoundError("Không tìm thấy tác vụ");
-      if (String(task.assignedTo || "") !== String(caller.userId)) {
+      const mine = String(task.assignedTo || "") === String(caller.userId);
+      // Nhiệm vụ theo ca giao cho cả ca nên không có một người nhận cụ thể:
+      // nhân viên cùng chi nhánh vẫn được báo cáo tiến độ việc này.
+      const shiftTaskOfBranch =
+        !task.assignedTo &&
+        task.sourceType === "shift" &&
+        !!caller.branchSlug &&
+        String(task.branchSlug || "").toLowerCase() === String(caller.branchSlug).toLowerCase();
+      if (!mine && !shiftTaskOfBranch) {
         throw new ForbiddenError("Bạn không có quyền cập nhật tác vụ của người khác");
       }
       // Nhân viên chỉ báo cáo tiến độ, không tự giao việc hay đổi hạn.
@@ -236,26 +288,6 @@ async function deleteTask(req, res, next) {
     const ok = await WorkService.deleteTask(req.params.id);
     if (!ok) throw new NotFoundError("Không tìm thấy tác vụ");
     return res.status(200).json({ data: { ok: true }, message: "Thao tác thành công" });
-  } catch (e) {
-    return next(e);
-  }
-}
-
-async function getShift(req, res, next) {
-  try {
-    const row = await WorkService.getShiftById(req.params.id);
-    if (!row) throw new NotFoundError("Không tìm thấy ca làm việc");
-    return res.status(200).json({ data: row, message: "Thao tác thành công" });
-  } catch (e) {
-    return next(e);
-  }
-}
-
-async function getTask(req, res, next) {
-  try {
-    const row = await WorkService.getTaskById(req.params.id);
-    if (!row) throw new NotFoundError("Không tìm thấy tác vụ");
-    return res.status(200).json({ data: row, message: "Thao tác thành công" });
   } catch (e) {
     return next(e);
   }
@@ -316,7 +348,6 @@ module.exports = {
   unregisterShift,
   listRegistrations,
   deleteRegistration,
-  getShift,
   checkin,
   checkout,
   listAttendance,
@@ -326,7 +357,6 @@ module.exports = {
   createTask,
   updateTask,
   deleteTask,
-  getTask,
   listTemplates,
   createTemplate,
   updateTemplate,

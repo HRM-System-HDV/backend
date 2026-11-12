@@ -52,6 +52,19 @@ function createStubDb(seed = {}) {
     if (where && "id" in where) return row.id === where.id;
     return false;
   };
+  // Điều kiện của updateMany: hỗ trợ so sánh bằng và so sánh >= để giống
+  // prisma (dùng để trừ số dư có điều kiện).
+  const matchesMany = (row, where = {}) => {
+    for (const [key, cond] of Object.entries(where)) {
+      if (cond && typeof cond === "object") {
+        if ("gte" in cond && !(Number(row[key] || 0) >= Number(cond.gte))) return false;
+        if ("equals" in cond && String(row[key]) !== String(cond.equals)) return false;
+        continue;
+      }
+      if (String(row[key]) !== String(cond)) return false;
+    }
+    return true;
+  };
   const table = (name) => ({
     findMany: async (args) => {
       if (isIdScan(args) && state.failIdScan) throw prismaErr("P1001");
@@ -80,7 +93,27 @@ function createStubDb(seed = {}) {
       state[name][idx] = { ...state[name][idx], ...args.data };
       return { ...state[name][idx] };
     },
-    updateMany: async () => ({ count: state[name].length }),
+    updateMany: async (args) => {
+      const where = (args && args.where) || {};
+      const data = (args && args.data) || {};
+      let count = 0;
+      state[name] = state[name].map((r) => {
+        if (!matchesMany(r, where)) return r;
+        count += 1;
+        const next = { ...r };
+        for (const [k, v] of Object.entries(data)) {
+          if (v && typeof v === "object" && "decrement" in v) {
+            next[k] = Number(r[k] || 0) - Number(v.decrement);
+          } else if (v && typeof v === "object" && "increment" in v) {
+            next[k] = Number(r[k] || 0) + Number(v.increment);
+          } else {
+            next[k] = v;
+          }
+        }
+        return next;
+      });
+      return { count };
+    },
     delete: async () => ({}),
   });
   const client = {

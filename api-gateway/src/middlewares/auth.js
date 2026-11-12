@@ -40,6 +40,7 @@ function createAuthMiddleware(options = {}) {
       req.user = {
         userId: payload.userId,
         email: payload.email,
+        name: payload.name || null,
         role: payload.role,
         branchSlug: payload.branchSlug,
       };

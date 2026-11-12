@@ -41,7 +41,7 @@ async function findById(id) {
 }
 
 // Loại đơn cần đồng nghiệp (người được nhờ) phản hồi trước khi quản lý duyệt.
-const RESPONDABLE_TYPES = new Set(["overtime", "shift_swap"]);
+const RESPONDABLE_TYPES = new Set(["shift_swap"]);
 
 const NOTIFICATION_TEXT_FIELDS = [
   "shiftName", "shiftDate", "shiftTime", "shiftHours",
@@ -82,7 +82,6 @@ function sanitizeNotificationFields(payload = {}) {
 
 function requestTypeOf(type) {
   if (type === "shift_swap") return "swap";
-  if (type === "overtime") return "cover";
   return null;
 }
 
