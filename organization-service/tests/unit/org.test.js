@@ -1,130 +1,76 @@
 "use strict";
-
+process.env.DATABASE_URL = "";
 const assert = require("node:assert/strict");
-const { test } = require("node:test");
-const { validateEmployee } = require("../../src/validators/orgValidator");
-const {
-  assertCanWriteEmployee,
-  assertCanCreateEmployee,
-  assertCanDeleteEmployee,
-} = require("../../src/utils/employeeAccess");
-
-test("validateEmployee systemRole", () => {
-  assert.deepEqual(validateEmployee({ name: "A", email: "a@company.com", systemRole: "staff" }), []);
-  assert.ok(validateEmployee({ name: "A", email: "a@company.com", systemRole: "boss" }).length > 0);
+const {test,beforeEach} = require("node:test");
+const identity = require("../../src/clients/IdentityClient");
+identity.syncEmployeeToIdentity = async () => ({ok:true});
+const service = require("../../src/services/OrgService");
+const database = require("../../src/config/database");
+const {normalize} = require("../../src/validators/orgValidator");
+const admin = {userId:"admin-user",role:"admin"};
+const employee = (extra={}) => ({name:"Nguyễn Văn A",email:"a@company.test",salaryType:"monthly",salary:"7800000",standardWorkDays:26,...extra});
+beforeEach(() => service.resetForTests());
+test("UUID IDs, business codes, salary and native dates follow new schema",async () => {
+  const branch = await service.createBranch({name:"Chi nhánh 1"},admin);
+  const dept = await service.createDepartment({name:"Phát triển",departmentCode:"DEPT-IT"},admin);
+  const pos = await service.createPosition({name:"Lập trình viên",positionCode:"POS-DEV",departmentId:dept.id},admin);
+  const row = await service.createEmployee(employee({email:" A@Company.Test ",branchId:branch.id,departmentId:dept.id,positionId:pos.id,joinDate:"2026-11-01"}),admin);
+  assert.match(row.id,/^[0-9a-f-]{36}$/); assert.equal(row.employeeCode,"NV-00001");
+  assert.equal(row.salary,"7800000"); assert.equal(row.email,"a@company.test"); assert.equal(row.joinDate,"2026-11-01");
+  for (const field of ["baseSalary","hourlySalary","branchSlug","systemRole","updatedAt"]) assert.equal(field in row,false);
 });
-
-// Bug 1: manager không được set field đặc quyền qua payload sửa hồ sơ thường.
-test("assertCanWriteEmployee: manager bị lọc field đặc quyền (systemRole/branchSlug/email/baseSalary)", () => {
-  const target = { id: "NV-0010", email: "nv@company.com", branchSlug: "CN-0001", systemRole: "staff" };
-  const manager = { userId: "NV-0002", role: "manager", branchSlug: "CN-0001" };
-  const payload = { name: "Đổi tên", phone: "0900", systemRole: "admin", branchSlug: "CN-0009", email: "hack@x.com", baseSalary: 99999999 };
-  const out = assertCanWriteEmployee(target, manager, payload);
-  assert.equal(out.name, "Đổi tên");
-  assert.equal(out.phone, "0900");
-  assert.ok(!("systemRole" in out));
-  assert.ok(!("branchSlug" in out));
-  assert.ok(!("email" in out));
-  assert.ok(!("baseSalary" in out));
+test("salary type constraints apply to create and merged updates",async () => {
+  await assert.rejects(service.createEmployee(employee({standardWorkDays:null}),admin),/số công/);
+  await assert.rejects(service.createEmployee(employee({salaryType:"hourly"}),admin),/lương giờ/);
+  const row = await service.createEmployee(employee(),admin);
+  await assert.rejects(service.updateEmployee(row.id,{salaryType:"hourly"},admin),/lương giờ/);
+  const hourly = await service.updateEmployee(row.id,{salaryType:"hourly",standardWorkDays:null,salary:"30000"},admin);
+  assert.equal(hourly.standardWorkDays,null);
+  await assert.rejects(service.updateEmployee(row.id,{salary:"-1"},admin),/Lương/);
+  await assert.rejects(service.updateEmployee(row.id,{joinDate:"2026-02-30"},admin),/YYYY-MM-DD/);
+  await assert.rejects(service.updateEmployee(row.id,{joinDate:"2026-11-10",resignedAt:"2026-11-01"},admin),/Ngày nghỉ/);
 });
-
-test("assertCanWriteEmployee: manager tự nâng quyền trên hồ sơ của mình cũng bị lọc", () => {
-  const self = { id: "NV-0002", email: "mgr@company.com", branchSlug: "CN-0001", systemRole: "manager" };
-  const manager = { userId: "NV-0002", role: "manager", branchSlug: "CN-0001" };
-  const out = assertCanWriteEmployee(self, manager, { systemRole: "admin", baseSalary: 100000000 });
-  assert.deepEqual(out, {});
+test("rejects old fields and duplicate normalized email without fallback",async () => {
+  await service.createEmployee(employee(),admin);
+  await assert.rejects(service.createEmployee(employee({email:"A@COMPANY.TEST"}),admin),error=>error.code === "DUPLICATE_RESOURCE");
+  assert.throws(()=>normalize("employee",{systemRole:"admin"},true),/Trường không hợp lệ/);
+  assert.throws(()=>normalize("employee",{baseSalary:1},true),/Trường không hợp lệ/);
 });
-
-test("assertCanWriteEmployee: manager sửa hồ sơ ngoài chi nhánh -> 403", () => {
-  const other = { id: "NV-0055", email: "k@company.com", branchSlug: "CN-0002", systemRole: "staff" };
-  const manager = { userId: "NV-0002", role: "manager", branchSlug: "CN-0001" };
-  assert.throws(() => assertCanWriteEmployee(other, manager, { name: "X" }), (e) => e.status === 403);
+test("position and managers must belong to the correct organization",async () => {
+  const dept = await service.createDepartment({name:"IT",departmentCode:"IT"},admin);
+  const pos = await service.createPosition({name:"Dev",positionCode:"DEV",departmentId:dept.id},admin);
+  await assert.rejects(service.createEmployee(employee({positionId:pos.id}),admin),/Vị trí/);
+  const branch = await service.createBranch({name:"CN"},admin);
+  const row = await service.createEmployee(employee({branchId:branch.id,departmentId:dept.id,positionId:pos.id}),admin);
+  await service.updateBranch(branch.id,{managerId:row.id},admin);
+  await assert.rejects(service.updateEmployee(row.id,{branchId:null},admin),/thay người phụ trách/);
+  await assert.rejects(service.updateBranch(branch.id,{managerId:"00000000-0000-4000-8000-000000000001"},admin),error=>error.status === 404);
 });
-
-test("assertCanWriteEmployee: admin giữ nguyên payload (vẫn đổi được lương/vai trò)", () => {
-  const target = { id: "NV-0010", branchSlug: "CN-0001", systemRole: "staff" };
-  const admin = { userId: "NV-0001", role: "admin", branchSlug: null };
-  const payload = { baseSalary: 25000000, systemRole: "manager" };
-  assert.deepEqual(assertCanWriteEmployee(target, admin, payload), payload);
+test("staff reads/edits self, manager only own branch, internal reads canonical data",async () => {
+  const b1 = await service.createBranch({name:"CN1"},admin), b2 = await service.createBranch({name:"CN2"},admin);
+  const one = await service.createEmployee(employee({branchId:b1.id}),admin);
+  const two = await service.createEmployee(employee({email:"b@company.test",branchId:b2.id}),admin);
+  const staff = {userId:"u1",employeeId:one.id,role:"staff",branchId:b1.id};
+  assert.equal((await service.listEmployees({},staff)).length,1);
+  await assert.rejects(service.getEmployee(two.id,staff),error=>error.status===403);
+  await assert.rejects(service.updateEmployee(one.id,{salary:"1"},staff),error=>error.status===403);
+  await service.updateEmployee(one.id,{phone:"0901234567"},staff);
+  const manager={userId:"m1",role:"manager",branchId:b1.id};
+  assert.equal((await service.listEmployees({branchId:b2.id},manager))[0].id,one.id);
+  await assert.rejects(service.updateEmployee(one.id,{branchId:null},manager),error=>error.status===403);
+  await assert.rejects(service.removeEmployee(two.id,manager),error=>error.status===403);
+  assert.equal((await service.getEmployee(two.id,{internal:true})).salary,"7800000");
 });
-
-// Bug 3: staff tự sửa hồ sơ mình bằng field thường -> pass; còn lại -> 403.
-test("assertCanWriteEmployee: staff tự sửa field thường -> chỉ trả về field đó", () => {
-  const self = { id: "NV-0009", email: "staff@company.com", branchSlug: "CN-0001", systemRole: "staff" };
-  const staff = { userId: "NV-0009", role: "staff", branchSlug: "CN-0001" };
-  assert.deepEqual(assertCanWriteEmployee(self, staff, { phone: "0900", name: "A" }), { phone: "0900", name: "A" });
+test("resignation preserves employee and attachments, synchronizes the account",async () => {
+  let action;
+  identity.syncEmployeeToIdentity=async (_row,command)=>{action=command;return {ok:true};};
+  const row = await service.createEmployee(employee({cccdFront:"/api/files/cccd/front.jpg"}),admin);
+  const resigned=await service.removeEmployee(row.id,admin,"2026-11-12");
+  assert.equal(resigned.status,"nghỉ việc"); assert.equal(action,"resign");
+  assert.equal((await service.getEmployee(row.id,admin)).cccdFront,row.cccdFront);
 });
-
-test("assertCanWriteEmployee: staff sửa hồ sơ người khác -> 403", () => {
-  const other = { id: "NV-0011", email: "b@company.com", branchSlug: "CN-0001", systemRole: "staff" };
-  const staff = { userId: "NV-0009", role: "staff", branchSlug: "CN-0001" };
-  assert.throws(() => assertCanWriteEmployee(other, staff, { phone: "0900" }), (e) => e.status === 403);
+test("Prisma errors propagate instead of silently writing memory",async () => {
+  const original=database.getPrisma;
+  database.getPrisma=()=>({branch:{findMany:async()=>{throw new Error("DB unavailable");}}});
+  try {await assert.rejects(service.listBranches({},admin),/DB unavailable/);} finally {database.getPrisma=original;}
 });
-
-test("assertCanWriteEmployee: staff tự sửa field đặc quyền (email/systemRole) -> 403", () => {
-  const self = { id: "NV-0009", email: "staff@company.com", branchSlug: "CN-0001", systemRole: "staff" };
-  const staff = { userId: "NV-0009", role: "staff", branchSlug: "CN-0001" };
-  assert.throws(() => assertCanWriteEmployee(self, staff, { systemRole: "admin" }), (e) => e.status === 403);
-});
-
-// Bug 2: quyền xóa phải chặn admin + scope chi nhánh.
-test("assertCanDeleteEmployee: manager không được xóa admin -> 403", () => {
-  const admin = { id: "NV-0001", email: "admin@company.com", branchSlug: "CN-0001", systemRole: "admin" };
-  const manager = { userId: "NV-0002", role: "manager", branchSlug: "CN-0001" };
-  assert.throws(() => assertCanDeleteEmployee(admin, manager), (e) => e.status === 403);
-});
-
-test("assertCanDeleteEmployee: manager không được xóa người ngoài chi nhánh -> 403", () => {
-  const other = { id: "NV-0077", branchSlug: "CN-0002", systemRole: "staff" };
-  const manager = { userId: "NV-0002", role: "manager", branchSlug: "CN-0001" };
-  assert.throws(() => assertCanDeleteEmployee(other, manager), (e) => e.status === 403);
-});
-
-test("assertCanDeleteEmployee: manager xóa người cùng chi nhánh (không phải admin) -> pass", () => {
-  const same = { id: "NV-0088", branchSlug: "CN-0001", systemRole: "staff" };
-  const manager = { userId: "NV-0002", role: "manager", branchSlug: "CN-0001" };
-  assert.doesNotThrow(() => assertCanDeleteEmployee(same, manager));
-});
-
-test("assertCanDeleteEmployee: staff không được xóa admin -> 403; admin xóa ai cũng pass", () => {
-  const admin = { id: "NV-0001", branchSlug: null, systemRole: "admin" };
-  const staff = { userId: "NV-0009", role: "staff", branchSlug: "CN-0001" };
-  const adminCaller = { userId: "NV-0001", role: "admin", branchSlug: null };
-  assert.throws(() => assertCanDeleteEmployee(admin, staff), (e) => e.status === 403);
-  assert.doesNotThrow(() => assertCanDeleteEmployee(admin, adminCaller));
-});
-
-// Bug 4: đường TẠO hồ sơ cũng là đường leo quyền, gateway chỉ chặn theo vai trò.
-test("assertCanCreateEmployee: manager không tạo được admin/manager -> 403", () => {
-  const manager = { userId: "NV-0002", role: "manager", branchSlug: "CN-0001" };
-  for (const systemRole of ["admin", "manager"]) {
-    assert.throws(
-      () => assertCanCreateEmployee(manager, { name: "A", email: "a@x.com", systemRole }),
-      (e) => e.status === 403,
-      `manager không được tạo systemRole=${systemRole}`
-    );
-  }
-});
-
-test("assertCanCreateEmployee: manager bị ghim chi nhánh, bản tạo mới luôn là staff", () => {
-  const manager = { userId: "NV-0002", role: "manager", branchSlug: "CN-0001" };
-  const out = assertCanCreateEmployee(manager, { name: "A", email: "a@x.com", branchSlug: "CN-0009" });
-  assert.equal(out.branchSlug, "CN-0001");
-  assert.equal(out.systemRole, "staff");
-});
-
-test("assertCanCreateEmployee: staff bị chặn, admin giữ nguyên payload", () => {
-  const staff = { userId: "NV-0009", role: "staff", branchSlug: "CN-0001" };
-  assert.throws(() => assertCanCreateEmployee(staff, { name: "A" }), (e) => e.status === 403);
-  const admin = { userId: "NV-0001", role: "admin", branchSlug: null };
-  const payload = { name: "A", email: "a@x.com", systemRole: "manager", branchSlug: "CN-0009", baseSalary: 5000000 };
-  assert.deepEqual(assertCanCreateEmployee(admin, payload), payload);
-});
-
-test("assertCanCreateEmployee: manager chưa được gán chi nhánh -> 403, không dựng hồ sơ trôi nổi", () => {
-  assert.throws(
-    () => assertCanCreateEmployee({ userId: "NV-0002", role: "manager", branchSlug: null }, { name: "A" }),
-    (e) => e.status === 403
-  );
-});
-

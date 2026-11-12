@@ -1,1116 +1,417 @@
 "use strict";
 
+const { randomUUID } = require("node:crypto");
+const { Prisma } = require("@prisma/client");
 const database = require("../config/database");
+const OrgClient = require("../clients/OrgClient");
 const IntegrationClient = require("../clients/IntegrationClient");
-const { isPrivileged } = require("../utils/caller");
-const { toVnDate, toVnDateTime, parseDate, dateKey, monthKey, todayVn } = require("../utils/dateFormat");
-const { NotFoundError, ValidationError, ForbiddenError, InternalServerError } = require("../utils/errors");
+const time = require("../utils/time");
+const { requireCaller, isPrivileged, assertAdmin } = require("../utils/caller");
+const { ValidationError, ForbiddenError, NotFoundError, ConflictError, InternalServerError } = require("../utils/errors");
 
-function uid(prefix) {
-  return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+const DEFAULT_CONFIG = Object.freeze({ isSingleton: true, gracePeriodMinutes: 0, checkoutWindowMinutes: 60,
+  shiftSwapMode: "manager_approval", latePenaltyPct: 10, earlyLeavePenaltyPct: 10,
+  earlyCheckinMinutes: 15, allowDoubleCheckin: false, doubleCheckinEarlyMinutes: 0,
+  doubleCheckinLateMinutes: 0, requireReasonSwap: true });
+const models = ["shiftTemplate", "shift", "attendance", "shiftRegistration", "task", "attendanceConfig"];
+const memory = Object.fromEntries(models.map((key) => [key, []]));
+let memoryQueue = Promise.resolve();
+
+function fail(message) { throw new ValidationError(message); }
+function fields(payload, allowed) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) fail("Dữ liệu đầu vào không hợp lệ");
+  for (const key of Object.keys(payload)) if (!allowed.includes(key)) fail(`Thuộc tính không hỗ trợ: ${key}`);
+  return { ...payload };
 }
-
-const seedShifts = [];
-const seedTasks = [];
-let memoryShifts = [];
-let memoryAttendances = [];
-let memoryTasks = [];
-let memoryRegistrations = [];
-let memoryConfig = { id: "default", latePenaltyAmount: 20000, earlyLeavePenaltyAmount: 0, gracePeriodMinutes: 5, checkoutWindowMinutes: 60, autoCloseShift: false, shiftSwapMode: "manual", latePenaltyPct: 10, earlyLeavePenaltyPct: 10, earlyCheckinMinutes: 15, maxPenaltiesPerMonth: 10, deductOnCheckout: true, allowDoubleCheckin: true, maxCheckinsPerDay: 3, maxSwapsPerMonth: 3, requireReasonSwap: true };
-let memoryTemplates = [];
-
-function sanitizeShiftPayload(payload = {}) {
-  const allowed = [
-    "employeeId",
-    "branchSlug",
-    "date",
-    "template",
-    "scheduledStart",
-    "scheduledEnd",
-    "checkIn",
-    "checkOut",
-    "status",
-    "note",
-    "isRecurring",
-  ];
-  const cleaned = {};
-  for (const k of allowed) {
-    if (payload[k] !== undefined) {
-      cleaned[k] = payload[k];
-    }
-  }
-  // Ngày ca luôn lưu DD/MM/YYYY, bất kể client gửi ISO hay dấu gạch ngang.
-  if (cleaned.date !== undefined && cleaned.date !== null && cleaned.date !== "") {
-    cleaned.date = toVnDate(cleaned.date) || String(cleaned.date).trim();
-  }
-  return cleaned;
+function id(value, label = "id") {
+  if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) fail(`${label} phải là UUID`);
+  return value;
 }
-
-function sanitizeAttendanceConfigPayload(payload = {}) {
-  const allowed = [
-    "latePenaltyAmount",
-    "earlyLeavePenaltyAmount",
-    "gracePeriodMinutes",
-    "checkoutWindowMinutes",
-    "autoCloseShift",
-    "shiftSwapMode",
-    "latePenaltyPct",
-    "earlyLeavePenaltyPct",
-    "earlyCheckinMinutes",
-    "maxPenaltiesPerMonth",
-    "deductOnCheckout",
-    "allowDoubleCheckin",
-    "maxCheckinsPerDay",
-    "maxSwapsPerMonth",
-    "requireReasonSwap",
-  ];
-  const cleaned = {};
-  for (const k of allowed) {
-    if (payload[k] !== undefined) {
-      if (typeof payload[k] === "boolean") {
-        cleaned[k] = payload[k];
-      } else if (typeof payload[k] === "number") {
-        cleaned[k] = Math.round(payload[k]);
-      } else if (typeof payload[k] === "string") {
-        if (k === "shiftSwapMode") {
-          cleaned[k] = payload[k];
-        } else {
-          const parsed = parseInt(payload[k], 10);
-          if (!isNaN(parsed)) {
-            cleaned[k] = parsed;
-          }
-        }
-      }
-    }
-  }
-  return cleaned;
+function requiredText(value, label) { if (typeof value !== "string" || !value.trim()) fail(`Thiếu ${label}`); return value.trim(); }
+function optionalText(value, label) { if (value !== undefined && value !== null && typeof value !== "string") fail(`${label} phải là chuỗi hoặc null`); }
+function manager(caller) { requireCaller(caller); if (caller.internal || !isPrivileged(caller)) throw new ForbiddenError("Chỉ admin hoặc quản lý được thực hiện thao tác này"); }
+function selfEmployee(value, caller) {
+  requireCaller(caller);
+  if (caller.internal || isPrivileged(caller)) return id(value || caller.employeeId, "employeeId");
+  if (!caller.employeeId || (value && value !== caller.employeeId)) throw new ForbiddenError("Chỉ được thao tác thông tin của chính mình");
+  return id(caller.employeeId, "employeeId");
 }
-
-function sanitizeTaskPayload(payload = {}) {
-  const allowed = [
-    "title",
-    "description",
-    "assignedTo",
-    "branchSlug",
-    "dueDate",
-    "status",
-    "sourceType",
-    "assignedByName",
-    "shiftName",
-    "priority",
-    "assignedToEmail",
-    "assignedToName",
-    "completedAt",
-    "requirePhoto",
-    "proofPhotoUrl",
-    "photoSubmittedBy",
-    "photoSubmittedAt",
-  ];
-  const cleaned = {};
-  for (const k of allowed) {
-    if (payload[k] !== undefined) {
-      cleaned[k] = payload[k];
-    }
-  }
-  for (const k of ["dueDate", "completedAt", "photoSubmittedAt"]) {
-    if (cleaned[k] !== undefined && cleaned[k] !== null && cleaned[k] !== "") {
-      cleaned[k] = toVnDateTime(cleaned[k]) || String(cleaned[k]).trim();
-    }
-  }
-  return cleaned;
+async function employeeScope(employeeId, caller) {
+  requireCaller(caller);
+  if (!caller.internal && !isPrivileged(caller) && caller.employeeId !== employeeId) throw new ForbiddenError("Không có quyền truy cập nhân viên này");
+  const employee = await OrgClient.getEmployee(id(employeeId, "employeeId"));
+  if (!employee) throw new NotFoundError("Không tìm thấy nhân viên");
+  if (!caller.internal && caller.role === "manager" && (!caller.branchId || employee.branchId !== caller.branchId)) throw new ForbiddenError("Nhân viên không thuộc chi nhánh được quản lý");
+  return employee;
 }
-
-async function ensureSeeded() {
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      const count = await prisma.shiftTemplate.count();
-      if (count === 0) {
-        await prisma.shiftTemplate.createMany({
-          data: [
-            { name: "Ca Sáng", startTime: "07:00", endTime: "14:00" },
-            { name: "Ca Chiều", startTime: "14:00", endTime: "22:00" },
-            { name: "Ca Tối", startTime: "18:00", endTime: "23:00" },
-          ],
-        });
-        console.log("[work-service] Đã khởi tạo 3 khung ca mẫu mặc định vào DB");
-      }
-
-      const existingConfig = await prisma.attendanceConfig.findUnique({ where: { id: "default" } });
-      if (!existingConfig) {
-        await prisma.attendanceConfig.create({
-          data: {
-            id: "default",
-            latePenaltyAmount: 20000,
-            earlyLeavePenaltyAmount: 0,
-            gracePeriodMinutes: 5,
-            checkoutWindowMinutes: 60,
-            autoCloseShift: false,
-            shiftSwapMode: "manual",
-            latePenaltyPct: 10,
-            earlyLeavePenaltyPct: 10,
-            earlyCheckinMinutes: 15,
-            maxPenaltiesPerMonth: 10,
-            deductOnCheckout: true,
-            allowDoubleCheckin: true,
-            maxCheckinsPerDay: 3,
-            maxSwapsPerMonth: 3,
-            requireReasonSwap: true,
-          },
-        });
-        console.log("[work-service] Đã khởi tạo attendanceConfig default vào DB");
-      }
-    } catch (e) {
-      console.warn("[work-service] Seed shift data lỗi:", e.message);
-    }
-  } else {
-    if (memoryTemplates.length === 0) {
-      memoryTemplates = [
-        { id: "st-1", name: "Ca Sáng", startTime: "07:00", endTime: "14:00" },
-        { id: "st-2", name: "Ca Chiều", startTime: "14:00", endTime: "22:00" },
-        { id: "st-3", name: "Ca Tối", startTime: "18:00", endTime: "23:00" },
-      ];
-    }
+async function accessibleEmployees(caller, branchId) {
+  requireCaller(caller);
+  if (!caller.internal && caller.role === "staff") return [await employeeScope(caller.employeeId, caller)];
+  if (!caller.internal && caller.role === "manager") {
+    if (!caller.branchId || (branchId && branchId !== caller.branchId)) throw new ForbiddenError("Không có quyền xem chi nhánh này");
+    branchId = caller.branchId;
   }
-  return { mode: prisma ? "postgres" : "memory" };
+  return OrgClient.listEmployees(branchId);
 }
-
-// --- Shifts ---
-async function listShifts(query = {}) {
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      const where = {};
-      if (query.branchSlug) where.branchSlug = query.branchSlug;
-      if (query.employeeId) where.employeeId = query.employeeId;
-      // Lọc/sắp xếp theo khóa YYYYMMDD để đúng cả với dữ liệu cũ (ISO/DD-MM-YYYY)
-      // trước khi migration, và đúng thứ tự ngày khi cột lưu DD/MM/YYYY.
-      const dateFilter = query.date ? dateKey(query.date) : "";
-      const rows = await prisma.shift.findMany({ where });
-      const filtered = dateFilter ? rows.filter((s) => dateKey(s.date) === dateFilter) : rows;
-      return await markMissedShifts(filtered.sort((a, b) => dateKey(b.date).localeCompare(dateKey(a.date))));
-    } catch (err) {
-      console.error("[work-service] Lỗi prisma.shift.findMany:", err);
-      throw new InternalServerError("Không đọc được danh sách ca làm việc từ CSDL", err);
-    }
-  }
-  const dateFilter = query.date ? dateKey(query.date) : "";
-  const rows = memoryShifts
-    .filter((s) => {
-      if (query.branchSlug && s.branchSlug !== query.branchSlug) return false;
-      if (query.employeeId && s.employeeId !== query.employeeId) return false;
-      if (dateFilter && dateKey(s.date) !== dateFilter) return false;
-      return true;
-    })
-    .sort((a, b) => dateKey(b.date).localeCompare(dateKey(a.date)));
-  return markMissedShifts(rows);
+async function rows(model, tx) {
+  const db = tx || database.getPrisma();
+  return db ? db[model].findMany() : memory[model];
 }
-
-async function nextShiftId() {
-  const prisma = database.getPrisma();
-  let max = 0;
-  const prefix = "CA-";
-  const scan = (raw) => {
-    const s = String(raw || "").trim().toUpperCase();
-    if (!s.startsWith(prefix)) return;
-    const n = Number(s.slice(prefix.length));
-    if (Number.isInteger(n) && n > max) max = n;
-  };
-  if (prisma) {
-    const rows = await prisma.shift
-      .findMany({ where: { id: { startsWith: prefix } }, select: { id: true } })
-      .catch(() => []);
-    rows.forEach((r) => scan(r.id));
-  } else {
-    memoryShifts.forEach((s) => scan(s.id));
-  }
-  return `${prefix}${String(max + 1).padStart(4, "0")}`;
-}
-
-async function nextTaskId() {
-  const prisma = database.getPrisma();
-  let max = 0;
-  const prefix = "CV-";
-  const scan = (raw) => {
-    const s = String(raw || "").trim().toUpperCase();
-    if (!s.startsWith(prefix)) return;
-    const n = Number(s.slice(prefix.length));
-    if (Number.isInteger(n) && n > max) max = n;
-  };
-  if (prisma) {
-    const rows = await prisma.task
-      .findMany({ where: { id: { startsWith: prefix } }, select: { id: true } })
-      .catch(() => []);
-    rows.forEach((r) => scan(r.id));
-  } else {
-    memoryTasks.forEach((t) => scan(t.id));
-  }
-  return `${prefix}${String(max + 1).padStart(4, "0")}`;
-}
-
-async function createShift(payload) {
-  const data = sanitizeShiftPayload(payload);
-  if (!data.id) {
-    data.id = await nextShiftId();
-  }
-  if (!data.status) {
-    data.status = "Chưa chấm công";
-  }
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      return await prisma.shift.create({ data });
-    } catch (err) {
-      console.error("[work-service] Lỗi prisma.shift.create:", err);
-      // Prisma có thật mà ghi hỏng: phải ném lên controller để client nhận 5xx.
-      // Rơi xuống memory sẽ trả 2xx cho bản ghi không nằm trong DB và biến mất
-      // ở lần listShifts kế tiếp (list chỉ đọc memory khi Prisma bằng null).
-      throw err;
-    }
-  }
-  const row = { status: "Chưa chấm công", ...data };
-  memoryShifts.push(row);
+async function find(model, key, tx) {
+  const db = tx || database.getPrisma();
+  const row = db ? await db[model].findUnique({ where: { id: key } }) : memory[model].find((r) => r.id === key);
+  if (!row) throw new NotFoundError("Không tìm thấy bản ghi");
   return row;
 }
-
-async function updateShift(id, payload) {
-  const data = sanitizeShiftPayload(payload);
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      return await prisma.shift.update({ where: { id }, data });
-    } catch (err) {
-      // P2025 = không có dòng để sửa -> 404; lỗi DB khác phải ném lên 500.
-      if (String(err.code) === "P2025") return null;
-      console.error("[work-service] Lỗi prisma.shift.update:", err);
-      throw err;
-    }
-  }
-  const idx = memoryShifts.findIndex((s) => s.id === id);
-  if (idx < 0) return null;
-  memoryShifts[idx] = { ...memoryShifts[idx], ...data };
-  return memoryShifts[idx];
+async function create(model, data, tx) {
+  const db = tx || database.getPrisma();
+  if (db) return db[model].create({ data });
+  const row = { id: randomUUID(), ...(model === "attendanceConfig" ? {} : { createdAt: new Date(Date.now()) }), ...data };
+  memory[model].push(row); return row;
 }
-
-async function deleteShift(id) {
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      await prisma.shift.delete({ where: { id } });
-      return true;
-    } catch (err) {
-      // P2025 = không có dòng để xóa -> 404; lỗi DB khác phải ném lên 500.
-      if (String(err.code) === "P2025") return false;
-      console.error("[work-service] Lỗi prisma.shift.delete:", err);
-      throw err;
-    }
-  }
-  const idx = memoryShifts.findIndex((s) => s.id === id);
-  if (idx < 0) return false;
-  memoryShifts.splice(idx, 1);
-  return true;
+async function update(model, key, data, tx) {
+  const db = tx || database.getPrisma();
+  if (db) return db[model].update({ where: { id: key }, data });
+  const row = await find(model, key); Object.assign(row, data); return row;
 }
-
-async function registerShift(payload) {
-  const rawWeek = payload.week || payload.preference || null;
-  // `week` có thể là ngày cụ thể hoặc khóa thứ (T2..CN); chỉ chuẩn hóa khi là ngày.
-  const week = rawWeek === null ? null : toVnDate(rawWeek) || rawWeek;
-  const shiftId = payload.shiftId || null;
-
-  // Nếu shiftId là 'off', hủy tất cả đăng ký ca của nhân viên trong ngày/tuần đó
-  if (shiftId === "off") {
-    await unregisterShift({ employeeId: payload.employeeId, week });
-    return { ok: true, unregistered: true };
-  }
-
-  const data = {
-    employeeId: payload.employeeId,
-    branchSlug: payload.branchSlug || null,
-    week,
-    shiftId,
-  };
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      // Tránh trùng lặp nếu đã đăng ký ca này vào ngày này rồi
-      const existing = await prisma.shiftRegistration.findFirst({
-        where: {
-          employeeId: data.employeeId,
-          week: data.week,
-          shiftId: data.shiftId,
-        },
-      });
-      if (existing) {
-        return existing;
-      }
-      return await prisma.shiftRegistration.create({ data });
-    } catch (err) {
-      console.error("[work-service] Lỗi prisma.shiftRegistration.create:", err);
-      // Như createShift: lỗi đăng ký ca phải ném ra, không được trả bản ghi memory.
-      throw err;
-    }
-  }
-  const existingMem = memoryRegistrations.find(
-    (r) => r.employeeId === data.employeeId && r.week === data.week && r.shiftId === data.shiftId
-  );
-  if (existingMem) return existingMem;
-  const row = { id: uid("reg"), ...data };
-  memoryRegistrations.push(row);
-  return row;
+async function remove(model, key, tx) {
+  const db = tx || database.getPrisma();
+  if (db) return db[model].delete({ where: { id: key } });
+  await find(model, key); memory[model] = memory[model].filter((r) => r.id !== key); return { ok: true };
 }
-
-async function unregisterShift({ employeeId, shiftId, week: rawWeek }) {
-  const week = rawWeek ? toVnDate(rawWeek) || rawWeek : rawWeek;
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      const where = {};
-      if (employeeId) where.employeeId = employeeId;
-      if (shiftId && shiftId !== "all" && shiftId !== "off") where.shiftId = shiftId;
-      if (week) where.week = week;
-      const result = await prisma.shiftRegistration.deleteMany({ where });
-      return result.count > 0;
-    } catch (err) {
-      // deleteMany không ném P2025: count=0 mới là "không có dòng nào", còn lỗi ở đây
-      // là lỗi DB thật và phải ném lên 500 thay vì trả 200 như đã hủy ca.
-      console.error("[work-service] Lỗi unregisterShift:", err);
-      throw err;
-    }
-  }
-  const beforeLen = memoryRegistrations.length;
-  memoryRegistrations = memoryRegistrations.filter((r) => {
-    if (employeeId && r.employeeId !== employeeId) return true;
-    if (week && r.week !== week) return true;
-    if (shiftId && shiftId !== "all" && shiftId !== "off" && r.shiftId !== shiftId) return true;
-    return false;
-  });
-  return memoryRegistrations.length < beforeLen;
+async function atomic(fn) {
+  const db = database.getPrisma();
+  if (db) return db.$transaction(fn, { isolationLevel: "Serializable" });
+  const previous = memoryQueue; let unlock;
+  memoryQueue = new Promise((resolve) => { unlock = resolve; }); await previous;
+  const backup = structuredClone(memory);
+  try { return await fn(null); }
+  catch (error) { for (const model of models) memory[model] = backup[model]; throw error; }
+  finally { unlock(); }
 }
-
-async function listRegistrations(query = {}) {
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      const where = {};
-      if (query.branchSlug) where.branchSlug = query.branchSlug;
-      if (query.week) where.week = query.week;
-      if (query.employeeId) where.employeeId = query.employeeId;
-      return await prisma.shiftRegistration.findMany({ where, orderBy: { createdAt: "desc" } });
-    } catch (err) {
-      console.error("[work-service] Lỗi prisma.shiftRegistration.findMany:", err);
-      throw new InternalServerError("Không đọc được đăng ký ca từ CSDL", err);
-    }
+async function getConfig(caller) {
+  requireCaller(caller);
+  if (!caller.internal) assertAdmin(caller);
+  const saved = (await rows("attendanceConfig")).find((r) => r.isSingleton === true);
+  return saved ? { ...saved } : { ...DEFAULT_CONFIG };
+}
+async function configValue(tx) { return (await rows("attendanceConfig", tx)).find((r) => r.isSingleton === true) || { ...DEFAULT_CONFIG }; }
+async function updateConfig(payload, caller) {
+  assertAdmin(caller);
+  const data = fields(payload, Object.keys(DEFAULT_CONFIG).filter((key) => key !== "isSingleton"));
+  for (const [key, value] of Object.entries(data)) {
+    if (["allowDoubleCheckin", "requireReasonSwap"].includes(key)) { if (typeof value !== "boolean") fail(`${key} phải là boolean`); }
+    else if (key === "shiftSwapMode") { if (!["manager_approval", "mutual_acceptance"].includes(value)) fail("Chế độ đổi ca không hợp lệ"); }
+    else if (!Number.isInteger(value) || value < 0 || (key.endsWith("Pct") && value > 100)) fail(`Giá trị ${key} không hợp lệ`);
   }
-  return memoryRegistrations.filter((r) => {
-    if (query.branchSlug && r.branchSlug !== query.branchSlug) return false;
-    if (query.week && r.week !== query.week) return false;
-    if (query.employeeId && r.employeeId !== query.employeeId) return false;
-    return true;
+  return atomic(async (tx) => {
+    const existing = (await rows("attendanceConfig", tx)).find((r) => r.isSingleton === true);
+    return existing ? update("attendanceConfig", existing.id, data, tx) : create("attendanceConfig", { ...DEFAULT_CONFIG, ...data }, tx);
   });
 }
 
-async function deleteRegistration(id) {
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      await prisma.shiftRegistration.delete({ where: { id } });
-      return true;
-    } catch (err) {
-      // P2025 = không có dòng để xóa -> 404; lỗi DB khác phải ném lên 500.
-      if (String(err.code) === "P2025") return false;
-      console.error("[work-service] Lỗi prisma.shiftRegistration.delete:", err);
-      throw err;
-    }
+async function listTemplates(caller) { requireCaller(caller); return rows("shiftTemplate"); }
+async function createTemplate(payload, caller) {
+  manager(caller);
+  const data = fields(payload, ["templateCode", "name", "startTime", "endTime"]);
+  data.templateCode = requiredText(data.templateCode, "templateCode"); data.name = requiredText(data.name, "name");
+  time.clock(data.startTime); time.clock(data.endTime);
+  return atomic(async (tx) => {
+    if ((await rows("shiftTemplate", tx)).some((r) => r.templateCode === data.templateCode)) throw new ConflictError("Mã ca mẫu đã tồn tại");
+    return create("shiftTemplate", data, tx);
+  });
+}
+async function updateTemplate(key, payload, caller) {
+  manager(caller); id(key);
+  const data = fields(payload, ["name", "startTime", "endTime"]);
+  if (data.name !== undefined) data.name = requiredText(data.name, "name");
+  for (const key of ["startTime", "endTime"]) if (data[key] !== undefined) time.clock(data[key]);
+  return atomic((tx) => update("shiftTemplate", key, data, tx));
+}
+async function deleteTemplate(key, caller) {
+  manager(caller); id(key);
+  return atomic(async (tx) => {
+    for (const model of ["shift", "shiftRegistration", "task"]) if ((await rows(model, tx)).some((r) => r.templateId === key)) throw new ConflictError("Ca mẫu đang được sử dụng");
+    return remove("shiftTemplate", key, tx);
+  });
+}
+function shiftProjection(shift, attendance, cfg) {
+  const { start, end } = time.bounds(shift); const now = Date.now();
+  const checkOutExpired = now >= end.getTime() + cfg.checkoutWindowMinutes * 60000;
+  return { ...shift, attendance: attendance || null,
+    attendanceState: attendance?.checkOut ? "completed" : attendance?.checkIn ? (checkOutExpired ? "missed_checkout" : "working") : (now >= start.getTime() + 60000 ? "missed_checkin" : "not_started"),
+    canCheckout: !!attendance?.checkIn && !attendance.checkOut && !checkOutExpired && shift.status !== "đã hủy" };
+}
+async function listShifts(query = {}, caller) {
+  requireCaller(caller);
+  const employees = query.employeeId ? [await employeeScope(query.employeeId, caller)] : await accessibleEmployees(caller, query.branchId);
+  const allowed = new Set(employees.map((e) => e.id));
+  const cfg = await configValue(); const attendance = await rows("attendance");
+  if (query.workDate) time.day(query.workDate); if (query.month) time.month(query.month);
+  return (await rows("shift")).filter((r) => allowed.has(r.employeeId) && (!query.workDate || time.day(r.workDate) === query.workDate) && (!query.month || time.day(r.workDate).startsWith(query.month)))
+    .map((r) => shiftProjection(r, attendance.find((a) => a.shiftId === r.id), cfg));
+}
+async function getShiftById(key, caller) {
+  const shift = await find("shift", id(key)); await employeeScope(shift.employeeId, caller);
+  return shift;
+}
+async function checkShiftConflict(candidate, excluding, tx) {
+  const { start, end } = time.bounds(candidate);
+  for (const row of await rows("shift", tx)) {
+    if (row.id === excluding || row.employeeId !== candidate.employeeId) continue;
+    if (time.day(row.workDate) === time.day(candidate.workDate) && row.templateId === candidate.templateId) throw new ConflictError("Nhân viên đã có ca này trong ngày");
+    if (candidate.status === "đã hủy" || row.status === "đã hủy") continue;
+    const other = time.bounds(row);
+    if (start < other.end && other.start < end) throw new ConflictError("Nhân viên đã có ca khác chồng giờ");
   }
-  const idx = memoryRegistrations.findIndex((r) => r.id === id);
-  if (idx < 0) return false;
-  memoryRegistrations.splice(idx, 1);
-  return true;
+}
+async function createShift(payload, caller) {
+  manager(caller);
+  const data = fields(payload, ["employeeId", "templateId", "workDate", "note"]);
+  optionalText(data.note, "note");
+  await employeeScope(id(data.employeeId), caller); id(data.templateId, "templateId"); data.workDate = time.date(data.workDate);
+  return atomic(async (tx) => {
+    const template = await find("shiftTemplate", data.templateId, tx);
+    const candidate = { ...data, scheduledStart: template.startTime, scheduledEnd: template.endTime, status: "đang làm" };
+    await checkShiftConflict(candidate, null, tx); return create("shift", candidate, tx);
+  });
+}
+async function updateShift(key, payload, caller) {
+  manager(caller); id(key);
+  const data = fields(payload, ["employeeId", "templateId", "workDate", "note", "status"]);
+  optionalText(data.note, "note");
+  const current = await getShiftById(key, caller);
+  if (data.employeeId) await employeeScope(id(data.employeeId), caller);
+  if (data.status && !["đang làm", "đã hủy"].includes(data.status)) fail("Trạng thái ca không hợp lệ");
+  if (data.workDate) data.workDate = time.date(data.workDate);
+  if (data.templateId) id(data.templateId);
+  return atomic(async (tx) => {
+    const live = await find("shift", current.id, tx);
+    if ((await rows("attendance", tx)).some((a) => a.shiftId === key && (a.checkIn || a.checkOut)) || Date.now() >= time.bounds(live).start.getTime()) throw new ConflictError("Chỉ được thay đổi ca chưa đến giờ và chưa chấm công");
+    if (data.templateId) { const template = await find("shiftTemplate", data.templateId, tx); data.scheduledStart = template.startTime; data.scheduledEnd = template.endTime; }
+    const candidate = { ...live, ...data }; await checkShiftConflict(candidate, key, tx);
+    return update("shift", key, data, tx);
+  });
+}
+async function deleteShift(key, caller) {
+  manager(caller); await getShiftById(key, caller);
+  return atomic(async (tx) => {
+    const shift = await find("shift", key, tx);
+    if ((await rows("attendance", tx)).some((a) => a.shiftId === key) || Date.now() >= time.bounds(shift).start.getTime()) throw new ConflictError("Ca đã bắt đầu hoặc có lịch sử chấm công, không thể xóa");
+    return remove("shift", key, tx);
+  });
+}
+async function registerShift(payload, caller) {
+  const data = fields(payload, ["employeeId", "templateId", "registerDate"]);
+  data.employeeId = selfEmployee(data.employeeId, caller); const employee = await employeeScope(data.employeeId, caller);
+  id(data.templateId); data.registerDate = time.date(data.registerDate); data.branchId = employee.branchId || null;
+  return atomic(async (tx) => {
+    await find("shiftTemplate", data.templateId, tx);
+    if ((await rows("shiftRegistration", tx)).some((r) => r.employeeId === data.employeeId && r.templateId === data.templateId && time.day(r.registerDate) === time.day(data.registerDate))) throw new ConflictError("Đã đăng ký ca này trong ngày");
+    return create("shiftRegistration", data, tx);
+  });
+}
+async function listRegistrations(query = {}, caller) {
+  const employees = query.employeeId ? [await employeeScope(query.employeeId, caller)] : await accessibleEmployees(caller, query.branchId);
+  const allowed = new Set(employees.map((e) => e.id));
+  if (query.registerDate) time.day(query.registerDate);
+  return (await rows("shiftRegistration")).filter((r) => allowed.has(r.employeeId) && (!query.registerDate || time.day(r.registerDate) === query.registerDate));
+}
+async function deleteRegistration(key, caller) {
+  const row = await find("shiftRegistration", id(key)); await employeeScope(row.employeeId, caller);
+  return atomic((tx) => remove("shiftRegistration", key, tx));
 }
 
-// --- Attendance ---
-function minutesOf(hhmm) {
-  if (!hhmm || !hhmm.includes(":")) return null;
-  const [h, m] = hhmm.split(":").map(Number);
-  return h * 60 + m;
+async function wifi(employee, payload) {
+  if (!employee.branchId) throw new ForbiddenError("Nhân viên chưa được gán chi nhánh để chấm công");
+  const bssid = String(payload?.wifi?.bssid || "").trim().toLowerCase();
+  const ssid = String(payload?.wifi?.ssid || "").trim();
+  if (!bssid) throw new ForbiddenError("Phải kết nối Wi-Fi hợp lệ trước khi mở ca chấm công");
+  const configs = await IntegrationClient.getWifiConfigs(employee.branchId);
+  if (!configs.some((r) => r.branchId === employee.branchId && r.status === "hoạt động" && String(r.bssid).toLowerCase() === bssid && (!ssid || r.ssid === ssid))) throw new ForbiddenError("Wi-Fi không thuộc chi nhánh được phép chấm công");
 }
-
-// Hạn chốt ra = giờ kết thúc ca + checkoutWindowMinutes, cùng cách app đang nhắc
-// "quên check-out sau 10/30/60 phút". Không tính từ giờ vào ca vì ca 8 tiếng sẽ
-// bị bỏ qua ngay khi nhân viên còn đang làm.
-function missedByWindow(row, shift, windowMin, now) {
-  if (!windowMin || !row || row.checkOut || !row.checkIn) return false;
-  const endMin = minutesOf(shift && shift.scheduledEnd);
-  const day = parseDate((shift && shift.date) || row.date);
-  if (endMin === null || !day) return false;
-  const deadline = new Date(
-    day.getFullYear(),
-    day.getMonth(),
-    day.getDate(),
-    Math.floor(endMin / 60),
-    (endMin % 60) + windowMin
-  );
-  return now > deadline.getTime();
-}
-
-async function getShiftForWindow(prisma, shiftId) {
-  if (!shiftId) return null;
-  if (prisma) return prisma.shift.findUnique({ where: { id: shiftId } });
-  return memoryShifts.find((s) => s.id === shiftId) || null;
-}
-
-// Bỏ qua ca chỉ được tính khi đọc, không cần cron.
-// onMissed(row, ref) chỉ chạy khi bản ghi THẬT SỰ bước sang trạng thái missed
-// (trạng thái đã lưu chưa phải "missed"), đó là chỗ để ghi + thông báo một lần.
-// Bản ghi đã lưu "missed" thì chỉ chiếu trạng thái, không ghi và không báo lại.
-async function markMissedRows(rows, refFor, onMissed) {
-  if (!rows.some((r) => r.checkIn && !r.checkOut)) return rows;
-  const cfg = await getConfig();
-  const windowMin = Number(cfg.checkoutWindowMinutes || 0);
-  if (!windowMin) return rows;
+async function preflight(payload, caller) {
+  fields(payload, ["employeeId", "wifi"]);
+  const employeeId = selfEmployee(payload.employeeId, caller); const employee = await employeeScope(employeeId, caller);
+  await wifi(employee, payload);
+  const cfg = await configValue();
   const now = Date.now();
-  const out = [];
-  for (const r of rows) {
-    const ref = r.checkIn && !r.checkOut ? await refFor(r) : null;
-    if (missedByWindow(r, ref, windowMin, now)) {
-      if (onMissed && r.status !== "missed") await onMissed(r, ref);
-      out.push({ ...r, status: "missed" });
-    } else {
-      out.push(r);
-    }
-  }
-  return out;
+  const available = (await listShifts({ employeeId }, caller)).filter((r) => {
+    const { start, end } = time.bounds(r);
+    return time.day(r.workDate) === time.today() || (!r.attendance?.checkOut && start.getTime() <= now && end.getTime() + cfg.checkoutWindowMinutes * 60000 > now);
+  });
+  return { workDate: time.today(), shifts: available,
+    config: Object.fromEntries(["earlyCheckinMinutes", "checkoutWindowMinutes", "allowDoubleCheckin", "doubleCheckinEarlyMinutes", "doubleCheckinLateMinutes"].map((key) => [key, cfg[key]])) };
 }
-
-function markMissedShifts(rows) {
-  return markMissedRows(rows, (s) => s);
+function attendanceEvaluation(row, shift, employee, cfg) {
+  if (!row.checkIn || !row.checkOut) return { ...row, penaltyAmount: "0", earnedSalary: "0", workedSeconds: 0, complete: false, shift };
+  const seconds = Math.max(0, (new Date(row.checkOut) - new Date(row.checkIn)) / 1000);
+  const { start, end } = time.bounds(shift);
+  const late = new Date(row.checkIn) > new Date(start.getTime() + cfg.gracePeriodMinutes * 60000);
+  const early = new Date(row.checkOut) < end;
+  const rate = new Prisma.Decimal(String(employee.salary));
+  if (rate.isNegative() || !["hourly", "monthly"].includes(employee.salaryType) || (employee.salaryType === "monthly" && (!Number.isInteger(employee.standardWorkDays) || employee.standardWorkDays <= 0))) fail("Thông tin lương nhân viên không hợp lệ");
+  const earned = employee.salaryType === "hourly" ? rate.mul(seconds).div(3600) : rate.div(employee.standardWorkDays);
+  const pct = (late ? cfg.latePenaltyPct : 0) + (early ? cfg.earlyLeavePenaltyPct : 0);
+  return { ...row, penaltyAmount: earned.mul(pct).div(100).toDecimalPlaces(0).toFixed(0), earnedSalary: earned.toFixed(), workedSeconds: seconds, complete: true,
+    status: late && early ? "late_early_leave" : late ? "late" : early ? "early_leave" : "present", shift };
 }
-
-// notify=false với luồng đọc nội bộ (payroll tính phạt khi lập phiếu lương): một
-// lần GET không được nhân bản thành N lần ghi DB + N thông báo cho dữ liệu cũ.
-function markMissedAttendance(rows, notify) {
-  return markMissedRows(
-    rows,
-    (a) => getShiftForWindow(database.getPrisma(), a.shiftId),
-    notify ? (a, shift) => rememberMissedAttendance(a, shift) : undefined
-  );
+async function attendanceAccess(payload, caller) {
+  requireCaller(caller);
+  const shift = await getShiftById(id(payload.shiftId, "shiftId"), caller);
+  if (payload.employeeId && payload.employeeId !== shift.employeeId) throw new ForbiddenError("Nhân viên không khớp ca");
+  if (shift.status === "đã hủy") throw new ConflictError("Ca đã hủy không được chấm công");
+  const employee = await employeeScope(shift.employeeId, caller); await wifi(employee, payload);
+  return { shift, employee };
 }
-
-// Ca bị bỏ qua phải đến tay admin/manager của chi nhánh: ghi status "missed" xuống
-// đúng bản ghi chấm công (lần đọc sau không báo trùng) rồi gửi MỘT thông báo phạm
-// vi chi nhánh. Lỗi gọi integration-service chỉ log và đọc vẫn trả dữ liệu; lỗi ghi
-// DB thì để ném lên, vì đọc ghi hỏng ở đây là lỗi thật (RULES: không nuốt lỗi Prisma).
-async function rememberMissedAttendance(row, shift) {
-  const prisma = database.getPrisma();
-  if (prisma) {
-    await prisma.attendance.update({ where: { id: row.id }, data: { status: "missed" } });
-  } else {
-    row.status = "missed";
-  }
-  const dateLabel = toVnDate((shift && shift.date) || row.date) || row.date || "";
-  const shiftLabel = (shift && shift.template) || row.shiftId || "không xác định";
-  try {
-    await IntegrationClient.createBranchNotification({
-      // targetEmployeeId = null + branchSlug: manager chi nhánh đó và admin đều thấy.
-      branchSlug: (shift && shift.branchSlug) || null,
-      targetEmployeeId: null,
-      title: `Nhân viên ${row.employeeId} chưa chốt ra, ca đã bị bỏ qua`,
-      body:
-        `Nhân viên ${row.employeeId} chưa chốt ra ca ${shiftLabel} ngày ${dateLabel} ` +
-        `(quá cửa sổ chốt ra). Ca này bị bỏ qua nên không được tính giờ; ` +
-        `vui lòng kiểm tra và chấm công ra cho nhân viên.`,
-      shiftName: shiftLabel,
-      shiftDate: dateLabel || null,
-      metadata: { reason: "missed_checkout", employeeId: row.employeeId, shiftId: row.shiftId || null, date: dateLabel },
-    });
-  } catch (err) {
-    console.warn("[work-service] Gửi thông báo ca bị bỏ qua thất bại:", err.message);
-  }
-}
-
-// Quá cửa sổ chốt ra thì ca bị bỏ qua. Ba nhánh quyền, đúng chủ ý đã chốt:
-// - Nhân viên: không tự chốt muộn, phải nhờ quản lý/admin (400).
-// - Admin: chốt hộ mọi ca.
-// - Manager: chỉ ca cùng chi nhánh; chi nhánh lấy từ header do gateway ký nên
-//   branchSlug trong body/query không bao giờ được tin. Guard này là của tuyến
-//   supplement cũ, chuyển sang đây khi tuyến đó bị xoá.
-async function assertWithinCheckoutWindow(prisma, target, shiftId, windowMin, caller) {
-  if (!windowMin || !target) return;
-  const ref = await getShiftForWindow(prisma, target.shiftId || shiftId);
-  if (!missedByWindow(target, ref, windowMin, Date.now())) return;
-  if (!isPrivileged(caller || {})) {
-    throw new ValidationError("Ca đã quá hạn chốt ra nên bị bỏ qua; bạn hãy liên hệ quản lý hoặc admin để chốt ca này");
-  }
-  if (caller.role === "manager" && String((ref && ref.branchSlug) || "") !== String(caller.branchSlug || "")) {
-    throw new ForbiddenError("Bạn chỉ chốt được ca của chi nhánh mình quản lý");
-  }
-}
-
-async function getConfig() {
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      let cfg = await prisma.attendanceConfig.findUnique({ where: { id: "default" } });
-      if (!cfg) {
-        cfg = await prisma.attendanceConfig.create({
-          data: {
-            id: "default",
-            latePenaltyAmount: 20000,
-            earlyLeavePenaltyAmount: 0,
-            gracePeriodMinutes: 5,
-            checkoutWindowMinutes: 60,
-            autoCloseShift: false,
-            shiftSwapMode: "manual",
-            latePenaltyPct: 10,
-            earlyLeavePenaltyPct: 10,
-            earlyCheckinMinutes: 15,
-            maxPenaltiesPerMonth: 10,
-            deductOnCheckout: true,
-            allowDoubleCheckin: true,
-            maxCheckinsPerDay: 3,
-            maxSwapsPerMonth: 3,
-            requireReasonSwap: true,
-          },
-        });
-      }
-      memoryConfig = { ...memoryConfig, ...cfg };
-      return cfg;
-    } catch (err) {
-      console.error("[work-service] Lỗi getConfig từ DB:", err);
-      throw new InternalServerError("Không đọc được cấu hình chấm công từ CSDL", err);
-    }
-  }
-  return memoryConfig;
-}
-
-async function updateConfig(payload) {
-  const data = sanitizeAttendanceConfigPayload(payload);
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      const res = await prisma.attendanceConfig.upsert({
-        where: { id: "default" },
-        create: { id: "default", ...data },
-        update: data,
-      });
-      memoryConfig = { ...memoryConfig, ...res };
-      return res;
-    } catch (err) {
-      console.error("[work-service] Lỗi prisma.attendanceConfig.upsert:", err);
-      // upsert trên id "default" không có nghĩa "thiếu dòng": đây là lỗi ghi thật,
-      // ném lên 500 thay vì trả 200 kèm cấu hình chỉ tồn tại trong bộ nhớ.
-      throw err;
-    }
-  }
-  memoryConfig = { ...memoryConfig, ...data };
-  return memoryConfig;
-}
-
-async function syncShiftCheckin(prisma, employeeId, shiftId, checkInTime) {
-  // Trả về ca vừa tìm được để checkin đối chiếu giờ bắt đầu ca mà không phải
-  // query lại shift lần hai.
-  let resolved = null;
-  if (prisma) {
-    try {
-      let shift = null;
-      if (shiftId) {
-        shift = await prisma.shift.findUnique({ where: { id: shiftId } }).catch(() => null);
-      }
-      if (!shift && employeeId) {
-        const today = todayVn();
-        const shifts = await prisma.shift.findMany({ where: { employeeId } }).catch(() => []);
-        shift = shifts.find((s) => dateKey(s.date) === dateKey(today)) || null;
-      }
-      if (shift) {
-        // Ca phải thuộc đúng nhân viên đang chấm công, nếu không thì một ca
-        // của người khác có thể bị ghi giờ vào/ra từ xa. Dữ liệu ca luôn có
-        // employeeId; dòng không có employeeId là dữ liệu cũ nên bỏ qua.
-        if (shift.employeeId && String(shift.employeeId) !== String(employeeId)) {
-          throw new ForbiddenError("Ca làm việc không thuộc nhân viên này");
-        }
-        resolved = shift;
-        await prisma.shift.update({
-          where: { id: shift.id },
-          data: { checkIn: checkInTime, status: "đang làm" },
-        });
-      }
-    } catch (err) {
-      if (err instanceof ForbiddenError) throw err;
-      console.error("[work-service] Lỗi đồng bộ ca làm khi checkin (prisma):", err);
-    }
-  }
-
-  let memShift = null;
-  if (shiftId) {
-    memShift = memoryShifts.find((s) => s.id === shiftId);
-  }
-  if (!memShift && employeeId) {
-    const today = todayVn();
-    memShift = memoryShifts.find((s) => s.employeeId === employeeId && dateKey(s.date) === dateKey(today));
-  }
-  if (memShift) {
-    if (memShift.employeeId && String(memShift.employeeId) !== String(employeeId)) {
-      throw new ForbiddenError("Ca làm việc không thuộc nhân viên này");
-    }
-    memShift.checkIn = checkInTime;
-    memShift.status = "đang làm";
-    resolved = resolved || memShift;
-  }
-  return resolved;
-}
-
-async function syncShiftCheckout(prisma, employeeId, shiftId, checkOutTime) {
-  if (prisma) {
-    try {
-      let shift = null;
-      if (shiftId) {
-        shift = await prisma.shift.findUnique({ where: { id: shiftId } }).catch(() => null);
-      }
-      if (!shift && employeeId) {
-        const today = todayVn();
-        const shifts = await prisma.shift.findMany({ where: { employeeId } }).catch(() => []);
-        shift = shifts.find((s) => dateKey(s.date) === dateKey(today)) || null;
-      }
-      if (shift) {
-        if (shift.employeeId && String(shift.employeeId) !== String(employeeId)) {
-          throw new ForbiddenError("Ca làm việc không thuộc nhân viên này");
-        }
-        await prisma.shift.update({
-          where: { id: shift.id },
-          data: { checkOut: checkOutTime, status: "hoàn thành" },
-        });
-      }
-    } catch (err) {
-      if (err instanceof ForbiddenError) throw err;
-      console.error("[work-service] Lỗi đồng bộ ca làm khi checkout (prisma):", err);
-    }
-  }
-
-  let memShift = null;
-  if (shiftId) {
-    memShift = memoryShifts.find((s) => s.id === shiftId);
-  }
-  if (!memShift && employeeId) {
-    const today = todayVn();
-    memShift = memoryShifts.find((s) => s.employeeId === employeeId && dateKey(s.date) === dateKey(today));
-  }
-  if (memShift) {
-    if (memShift.employeeId && String(memShift.employeeId) !== String(employeeId)) {
-      throw new ForbiddenError("Ca làm việc không thuộc nhân viên này");
-    }
-    memShift.checkOut = checkOutTime;
-    memShift.status = "hoàn thành";
-  }
-}
-
-async function checkin({ employeeId, shiftId, time, checkinTime }) {
-  const cfg = await getConfig();
-  const now = new Date();
-  const effectiveTime = time || checkinTime || `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-  const prisma = database.getPrisma();
-  const shift = await syncShiftCheckin(prisma, employeeId, shiftId, effectiveTime);
-  // Phạt đi muộn: giờ chấm công trễ hơn (giờ bắt đầu ca + thời gian cho phép trễ).
-  // Không tìm được ca trong ngày thì không có giờ chuẩn, nên không phạt.
-  const startMin = minutesOf(shift && shift.scheduledStart);
-  const inMin = minutesOf(effectiveTime);
-  const lateMinutes =
-    startMin === null || inMin === null ? 0 : inMin - (startMin + (cfg.gracePeriodMinutes || 0));
-  const isLate = lateMinutes > 0 && (cfg.latePenaltyAmount || 0) > 0;
-  const row = {
-    id: uid("att"),
-    employeeId,
-    shiftId: shiftId || null,
-    date: todayVn(),
-    checkIn: effectiveTime,
-    checkOut: null,
-    penaltyAmount: isLate ? cfg.latePenaltyAmount : 0,
-    penaltyNote: isLate ? `Đi muộn ${lateMinutes} phút so với ca ${shift.scheduledStart}` : null,
-    status: isLate ? "late" : "present",
-  };
-  if (prisma) {
-    try {
-      return await prisma.attendance.create({ data: row });
-    } catch (err) {
-      console.error("[work-service] Lỗi prisma.attendance.create:", err);
-      // Chấm công vào không ghi được DB thì phải báo lỗi thật; bản ghi memory
-      // sẽ mất ngay ở lần listAttendance tiếp theo vì list không gộp memory.
-      throw err;
-    }
-  }
-  memoryAttendances.push(row);
-  return row;
-}
-
-// `caller` là danh tính controller đọc từ header do gateway ký (userId/role/branchSlug).
-// Chỉ nhân viên tự chốt ra muộn mới bị chặn; admin/manager chốt hộ ca đã bị bỏ qua
-// bằng chính tuyến POST /api/attendance/checkout, không có endpoint riêng.
-async function checkout({ employeeId, shiftId, time, checkoutTime, caller }) {
-  const cfg = await getConfig();
-  const windowMin = Number(cfg.checkoutWindowMinutes || 0);
-  const prisma = database.getPrisma();
-  const now = new Date();
-  const serverTime = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-  const out = time || checkoutTime || serverTime;
-  // Ưu tiên bản ghi mở của HÔM NAY. Trước đây chỉ cần "bản ghi mở gần nhất" nên
-  // một lần chốt hôm nay có thể đóng nhầm ca còn mở của tuần trước. Vẫn giữ
-  // nhánh fallback vì Ca Tối trải qua nửa đêm: sáng hôm sau chốt ra là hợp lệ.
-  const today = dateKey(todayVn());
-  // shiftId là ô bắt buộc khi admin/manager chốt hộ một ca cụ thể: nếu chỉ
-  // "bản ghi mở gần nhất" thì lần chốt hộ ca bị bỏ qua hôm trước lại đóng nhầm
-  // bản ghi đang mở của hôm nay. Không có shiftId (nhân viên tự chốt) thì giữ
-  // nguyên luật cũ, kể cả nhánh fallback cho Ca Tối trải qua nửa đêm.
-  const pickOpen = (list) =>
-    (shiftId ? list.find((r) => !r.checkOut && String(r.shiftId || "") === String(shiftId)) : null) ||
-    list.find((r) => !r.checkOut && dateKey(r.date) === today) ||
-    list.find((r) => !r.checkOut) ||
-    null;
-  let target = null;
-  if (prisma) {
-    try {
-      const rows = await prisma.attendance.findMany({ where: { employeeId }, orderBy: { createdAt: "desc" } });
-      target = pickOpen(rows);
-      if (target) {
-        await assertWithinCheckoutWindow(prisma, target, shiftId, windowMin, caller);
-        // Chỉ đồng bộ ca khi chắc chắn chốt được: nếu làm trước, ca bị đánh dấu
-        // "hoàn thành" trong khi bản ghi chấm công vẫn mở và request trả lỗi.
-        await syncShiftCheckout(prisma, employeeId, shiftId, out);
-        // Phần phạt đi muộn đã ghi khi chấm công phải sống sót qua lần chốt ra:
-        // trước đây penaltyAmount bị ghi đè nên nhân viên vừa trễ vừa về sớm chỉ bị
-        // tính một lần, và status "present" ghi đè mất nhãn "late".
-        const latePart = Number(target.penaltyAmount || 0);
-        // Bản ghi từng bị "missed" (lưu khi quá cửa sổ) được quản lý/admin chốt hộ
-        // thì phải trở lại trạng thái được ghi công; nhãn "late" lấy lại theo phần
-        // phạt đã ghi vì status cũ đã bị missed đè lên.
-        let penalty = latePart;
-        let status = target.status === "missed" ? (latePart > 0 ? "late" : "present") : target.status || "present";
-        const outMin = minutesOf(out);
-        if (outMin !== null && outMin < 17 * 60) {
-          penalty = latePart + (cfg.earlyLeavePenaltyAmount || 0);
-          status = "early_leave";
-        }
-        return await prisma.attendance.update({ where: { id: target.id }, data: { checkOut: out, penaltyAmount: penalty, status } });
-      }
-    } catch (err) {
-      // Lỗi nghiệp vụ (400/403/404) ném từ trong nhánh này không phải lỗi DB.
-      if (err.status && err.status < 500) throw err;
-      console.error("[work-service] Lỗi prisma.attendance.checkout:", err);
-      // Nhánh này trước đây rơi xuống memory và còn tự gọi lại checkin(),
-      // tạo bản ghi "thành công" chỉ có trong bộ nhớ. Ném lỗi thật lên controller.
-      throw err;
-    }
-    // Prisma sống nhưng hết hàm try là chưa có bản ghi mở để chốt (nhánh trên đã return).
-    // Phải trả lỗi thật: trước đây code rơi xuống memory rồi checkin() hộ, client nhận
-    // 200 kèm checkOut chưa từng được ghi vào DB.
-    throw new NotFoundError("Không tìm thấy bản ghi chấm công đang mở để chốt ra");
-  }
-  target = pickOpen([...memoryAttendances].reverse().filter((r) => r.employeeId === employeeId));
-  await assertWithinCheckoutWindow(null, target, shiftId, windowMin, caller);
-  await syncShiftCheckout(prisma, employeeId, shiftId, out);
-  if (!target) {
-    const ci = await checkin({ employeeId, shiftId, time: "08:00" });
-    target = ci;
-  }
-  const latePart = Number(target.penaltyAmount || 0);
-  let penalty = latePart;
-  // Như nhánh Prisma: chốt hộ thì bản ghi "missed" quay lại trạng thái ghi công.
-  let status = target.status === "missed" ? (latePart > 0 ? "late" : "present") : target.status || "present";
-  const outMin = minutesOf(out);
-  if (outMin !== null && outMin < 17 * 60) {
-    penalty = latePart + (cfg.earlyLeavePenaltyAmount || 0);
-    status = "early_leave";
-  }
-  target.checkOut = out;
-  target.penaltyAmount = penalty;
-  target.status = status;
-  return target;
-}
-
-async function listAttendance(query = {}) {
-  // query.actor do controller gắn từ header x-user-id do gateway ký: null nghĩa là
-  // luồng nội bộ (payroll đọc phạt khi lập phiếu lương) — chỉ chiếu trạng thái,
-  // không ghi DB và không bắn thông báo, để một lần GET không nhân bản thành N hiệu ứng.
-  const notify = query.actor !== null;
-  const prisma = database.getPrisma();
-  const dateFilter = query.date ? dateKey(query.date) : "";
-  const monthFilter = query.month ? monthKey(query.month) : null;
-  const matchDate = (a) =>
-    (!dateFilter || dateKey(a.date) === dateFilter) &&
-    (!monthFilter || dateKey(a.date).slice(0, 6) === `${monthFilter.yy}${monthFilter.mon}`);
-  if (prisma) {
-    try {
-      let rows;
-      if (query.branchSlug) {
-        // attendance không lưu branchSlug: lọc theo shift
-        const shifts = await prisma.shift.findMany({ where: { branchSlug: query.branchSlug } });
-        const ids = new Set(shifts.map((s) => s.id));
-        const all = await prisma.attendance.findMany({ orderBy: { createdAt: "desc" } });
-        rows = all.filter(
-          (a) =>
-            (query.employeeId ? a.employeeId === query.employeeId : true) &&
-            (a.shiftId ? ids.has(a.shiftId) : false)
-        );
-      } else {
-        const where = {};
-        if (query.employeeId) where.employeeId = query.employeeId;
-        rows = await prisma.attendance.findMany({ where, orderBy: { createdAt: "desc" } });
-      }
-      // Chấp nhận month=YYYY-MM hoặc MM/YYYY, so theo khóa YYYYMMDD.
-      // checkOut của bản ghi missed vẫn null: client không tính được giờ công,
-      // đó là cách "ca không được ghi công" biểu diễn bằng dữ liệu.
-      return await markMissedAttendance(rows.filter(matchDate), notify);
-    } catch (err) {
-      console.error("[work-service] Lỗi prisma.attendance.list:", err);
-      throw new InternalServerError("Không đọc được dữ liệu chấm công từ CSDL", err);
-    }
-  }
-  let out = [...memoryAttendances];
-  if (query.employeeId) out = out.filter((a) => a.employeeId === query.employeeId);
-  return markMissedAttendance(out.filter(matchDate), notify);
-}
-
-// --- Tasks ---
-async function listTasks(query = {}) {
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      const where = {};
-      if (query.branchSlug) {
-        where.branchSlug = { equals: query.branchSlug, mode: "insensitive" };
-      }
-      if (query.status) where.status = query.status;
-      if (query.includeShiftTasksOfBranch) {
-        // Nhiệm vụ giao riêng cho tôi + nhiệm vụ theo ca của chi nhánh tôi
-        // (nhiệm vụ theo ca không có một người nhận cụ thể).
-        where.OR = [
-          { assignedTo: query.assignedTo },
-          {
-            assignedTo: null,
-            sourceType: "shift",
-            branchSlug: { equals: query.includeShiftTasksOfBranch, mode: "insensitive" },
-          },
-        ];
-      } else if (query.assignedTo) {
-        where.assignedTo = query.assignedTo;
-      }
-      return await prisma.task.findMany({ where, orderBy: { createdAt: "desc" } });
-    } catch (err) {
-      console.error("[work-service] Lỗi prisma.task.findMany:", err);
-      throw new InternalServerError("Không đọc được danh sách tác vụ từ CSDL", err);
-    }
-  }
-  return memoryTasks.filter((t) => {
-    if (query.branchSlug && (t.branchSlug || "").toLowerCase() !== query.branchSlug.toLowerCase()) return false;
-    if (query.status && t.status !== query.status) return false;
-    if (query.includeShiftTasksOfBranch) {
-      const mine = query.assignedTo && t.assignedTo === query.assignedTo;
-      const shiftTask =
-        !t.assignedTo &&
-        t.sourceType === "shift" &&
-        (t.branchSlug || "").toLowerCase() === String(query.includeShiftTasksOfBranch).toLowerCase();
-      if (!mine && !shiftTask) return false;
-    } else if (query.assignedTo && t.assignedTo !== query.assignedTo) {
-      return false;
-    }
-    return true;
+async function checkin(payload, caller) {
+  fields(payload, ["employeeId", "shiftId", "wifi"]);
+  const { shift } = await attendanceAccess(payload, caller);
+  return atomic(async (tx) => {
+    const live = await find("shift", shift.id, tx); const cfg = await configValue(tx); const now = new Date(Date.now()); const { start, end } = time.bounds(live);
+    if (live.employeeId !== shift.employeeId) throw new ConflictError("Phân công ca vừa thay đổi, vui lòng tải lại");
+    if (live.status === "đã hủy" || now >= end) throw new ConflictError("Ca đã kết thúc hoặc đã hủy");
+    if (now < new Date(start.getTime() - cfg.earlyCheckinMinutes * 60000)) fail("Chưa đến khoảng thời gian cho phép check-in");
+    const current = (await rows("attendance", tx)).find((r) => r.shiftId === shift.id);
+    if (current?.checkIn || current?.checkOut) throw new ConflictError("Ca đã được check-in");
+    const data = { employeeId: live.employeeId, shiftId: live.id, workDate: live.workDate, checkIn: now, checkOut: null, penaltyAmount: "0",
+      status: now > new Date(start.getTime() + cfg.gracePeriodMinutes * 60000) ? "late" : "present" };
+    return current ? update("attendance", current.id, data, tx) : create("attendance", data, tx);
   });
 }
-
-async function createTask(payload) {
-  const data = sanitizeTaskPayload(payload);
-  if (!data.id) {
-    data.id = await nextTaskId();
-  }
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      return await prisma.task.create({ data });
-    } catch (err) {
-      console.error("[work-service] Lỗi prisma.task.create:", err);
-      // Như createShift: nhiệm vụ chỉ nằm trong memory sẽ mất khi tải lại,
-      // trong khi client đã nhận 201. Ném lỗi DB lên controller.
-      throw err;
-    }
-  }
-  const row = { status: "pending", ...data };
-  memoryTasks.push(row);
-  return row;
+async function checkout(payload, caller) {
+  fields(payload, ["employeeId", "shiftId", "wifi"]);
+  const { shift, employee } = await attendanceAccess(payload, caller);
+  return atomic(async (tx) => {
+    const live = await find("shift", shift.id, tx); const cfg = await configValue(tx); const now = new Date(Date.now());
+    const current = (await rows("attendance", tx)).find((r) => r.shiftId === live.id);
+    if (live.status === "đã hủy" || live.employeeId !== shift.employeeId) throw new ConflictError("Ca đã hủy hoặc phân công vừa thay đổi");
+    if (!current?.checkIn) fail("Chưa có check-in cho ca này");
+    if (current.checkOut) throw new ConflictError("Ca đã được checkout");
+    if (now >= new Date(time.bounds(live).end.getTime() + cfg.checkoutWindowMinutes * 60000)) fail("Ca đã hết hạn checkout, vui lòng chấm công ca khác hoặc gửi đơn");
+    if (now < new Date(current.checkIn)) fail("Giờ ra không thể trước giờ vào");
+    const evaluated = attendanceEvaluation({ ...current, checkOut: now }, live, employee, cfg);
+    return update("attendance", current.id, { checkOut: now, penaltyAmount: evaluated.penaltyAmount, status: evaluated.status, penaltyNote: evaluated.status === "present" ? null : "Phạt phần trăm theo giờ vào/ra ca" }, tx);
+  });
+}
+async function doubleAttendance(payload, caller) {
+  fields(payload, ["shiftId", "nextShiftId", "employeeId", "wifi"]);
+  const { shift, employee } = await attendanceAccess(payload, caller);
+  const next = await getShiftById(id(payload.nextShiftId, "nextShiftId"), caller);
+  if (next.employeeId !== shift.employeeId || next.id === shift.id) fail("Hai ca phải khác nhau và cùng nhân viên");
+  return atomic(async (tx) => {
+    const previous = await find("shift", shift.id, tx); const following = await find("shift", next.id, tx); const cfg = await configValue(tx);
+    const join = time.bounds(previous).end; const nextStart = time.bounds(following).start; const now = Date.now();
+    if (!cfg.allowDoubleCheckin) fail("Chấm công kép đang tắt");
+    if (previous.status === "đã hủy" || following.status === "đã hủy" || previous.employeeId !== employee.id || following.employeeId !== employee.id || join.getTime() !== nextStart.getTime()) fail("Hai ca không liền nhau, đã hủy hoặc vừa đổi người");
+    if (now < join.getTime() - cfg.doubleCheckinEarlyMinutes * 60000 || now > join.getTime() + cfg.doubleCheckinLateMinutes * 60000 || now >= join.getTime() + cfg.checkoutWindowMinutes * 60000) fail("Ngoài khoảng cho phép chấm công kép");
+    const all = await rows("attendance", tx); const before = all.find((r) => r.shiftId === previous.id); const after = all.find((r) => r.shiftId === following.id);
+    if (!before?.checkIn || before.checkOut || after?.checkIn || after?.checkOut) throw new ConflictError("Trạng thái chấm công hai ca không còn hợp lệ");
+    if (join < new Date(before.checkIn)) fail("Mốc nối ca không thể trước giờ vào");
+    const evaluated = attendanceEvaluation({ ...before, checkOut: join }, previous, employee, cfg);
+    const completed = await update("attendance", before.id, { checkOut: join, status: evaluated.status, penaltyAmount: evaluated.penaltyAmount }, tx);
+    const data = { shiftId: following.id, employeeId: following.employeeId, workDate: following.workDate, checkIn: join, checkOut: null, penaltyAmount: "0", status: "present" };
+    const opened = after ? await update("attendance", after.id, data, tx) : await create("attendance", data, tx);
+    return { previous: completed, next: opened };
+  });
+}
+async function saveAttendance(shiftId, payload, caller) {
+  manager(caller); fields(payload, ["checkIn", "checkOut", "penaltyNote"]);
+  optionalText(payload.penaltyNote, "penaltyNote");
+  const shift = await getShiftById(id(shiftId), caller); const employee = await employeeScope(shift.employeeId, caller);
+  const checkIn = time.timestamp(payload.checkIn); const checkOut = time.timestamp(payload.checkOut);
+  const { start, end } = time.bounds(shift);
+  if (shift.status === "đã hủy" || checkOut < checkIn || checkIn >= end || checkOut < start || checkIn > new Date(Date.now()) || checkOut > new Date(Date.now())) fail("Giờ chấm công được chọn không hợp lệ cho ca");
+  const saved = await atomic(async (tx) => {
+    const current = (await rows("attendance", tx)).find((r) => r.shiftId === shift.id);
+    const data = { shiftId: shift.id, employeeId: shift.employeeId, workDate: shift.workDate, checkIn, checkOut, penaltyNote: payload.penaltyNote || null };
+    const evaluated = attendanceEvaluation(data, shift, employee, await configValue(tx)); data.penaltyAmount = evaluated.penaltyAmount; data.status = evaluated.status;
+    return current ? update("attendance", current.id, data, tx) : create("attendance", data, tx);
+  });
+  // Audit is in a different service/DB; a logging outage must not claim the committed save failed.
+  await IntegrationClient.writeBacklog({ userId: caller.userId, userName: caller.name || "Người dùng", userRole: caller.role, action: "attendance_saved", module: "work", entityType: "attendance", entityId: saved.id, targetName: `${employee.name || employee.id} ${time.day(shift.workDate)}` })
+    .catch((error) => console.warn("[work-service] Đã lưu công nhưng chưa ghi được nhật ký:", error.message));
+  return saved;
+}
+async function listAttendance(query = {}, caller) {
+  requireCaller(caller);
+  const employees = query.employeeId ? [await employeeScope(query.employeeId, caller)] : await accessibleEmployees(caller, query.branchId);
+  const byId = new Map(employees.map((e) => [e.id, e])); const shifts = await rows("shift"); const cfg = await configValue();
+  if (query.month) time.month(query.month); if (query.workDate) time.day(query.workDate);
+  return (await rows("attendance")).filter((r) => byId.has(r.employeeId) && (!query.month || time.day(r.workDate).startsWith(query.month)) && (!query.workDate || time.day(r.workDate) === query.workDate))
+    .map((r) => { const shift = shifts.find((s) => s.id === r.shiftId); if (!shift) throw new InternalServerError("Chấm công thiếu ca tham chiếu"); return attendanceEvaluation(r, shift, byId.get(r.employeeId), cfg); });
 }
 
-async function updateTask(id, payload) {
-  const data = sanitizeTaskPayload(payload);
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      return await prisma.task.update({ where: { id }, data });
-    } catch (err) {
-      // P2025 = không có dòng để sửa -> 404; lỗi DB khác phải ném lên 500.
-      if (String(err.code) === "P2025") return null;
-      console.error("[work-service] Lỗi prisma.task.update:", err);
-      throw err;
-    }
+async function taskScope(task, caller) {
+  requireCaller(caller);
+  if (task.assignedTo) return employeeScope(task.assignedTo, caller);
+  if (caller.internal || caller.role === "admin") return;
+  const branchId = caller.role === "staff" ? (await employeeScope(caller.employeeId, caller)).branchId : caller.branchId;
+  if (!branchId || branchId !== task.branchId) throw new ForbiddenError("Công việc không thuộc chi nhánh của bạn");
+  if (caller.role === "staff") {
+    const shifts = await rows("shift");
+    if (!shifts.some((r) => r.employeeId === caller.employeeId && r.templateId === task.templateId && time.day(r.workDate) === time.day(task.workDate) && r.status !== "đã hủy")) throw new ForbiddenError("Bạn không được phân ca của công việc này");
   }
-  const idx = memoryTasks.findIndex((t) => t.id === id);
-  if (idx < 0) return null;
-  memoryTasks[idx] = { ...memoryTasks[idx], ...data };
-  return memoryTasks[idx];
 }
-
-async function deleteTask(id) {
-  const task = await getTaskById(id);
-  if (!task) return false;
-  const prisma = database.getPrisma();
-  let deleted = false;
-  if (prisma) {
-    try {
-      await prisma.task.delete({ where: { id } });
-      deleted = true;
-    } catch (err) {
-      // P2025 = không có dòng để xóa -> 404; lỗi DB khác phải ném lên 500,
-      // nếu rơi xuống memory sẽ xóa nhầm bản trùng id trong bộ nhớ và vẫn báo thành công.
-      if (String(err.code) === "P2025") return false;
-      console.error("[work-service] Lỗi prisma.task.delete:", err);
-      throw err;
-    }
+const TASK_FIELDS = ["title", "description", "assignedTo", "branchId", "dueDate", "workDate", "templateId", "priority", "requirePhoto", "status", "proofPhotoUrl"];
+async function validateTask(data, caller, tx) {
+  data.title = requiredText(data.title, "title");
+  for (const key of ["description", "priority", "proofPhotoUrl"]) optionalText(data[key], key);
+  if (!["pending", "in_progress", "done"].includes(data.status || "pending")) fail("Trạng thái công việc không hợp lệ");
+  if (data.requirePhoto !== undefined && typeof data.requirePhoto !== "boolean") fail("requirePhoto phải là boolean");
+  if (data.assignedTo) { const employee = await employeeScope(id(data.assignedTo), caller); data.branchId = employee.branchId; }
+  else {
+    id(data.branchId, "branchId"); id(data.templateId, "templateId"); data.workDate = time.date(data.workDate);
+    await find("shiftTemplate", data.templateId, tx);
+    if (caller.role === "manager" && caller.branchId !== data.branchId) throw new ForbiddenError("Không được giao việc sang chi nhánh khác");
   }
-  if (!deleted) {
-    const idx = memoryTasks.findIndex((t) => t.id === id);
-    if (idx < 0) return false;
-    memoryTasks.splice(idx, 1);
-  }
-  // Xóa ảnh minh chứng best-effort, không chặn thao tác xóa nhiệm vụ.
-  if (task.proofPhotoUrl) {
-    IntegrationClient.deleteFileByUrl(task.proofPhotoUrl).catch((e) => {
-      console.warn("[work-service] Xóa ảnh minh chứng thất bại:", e.message);
-    });
-  }
-  return true;
+  if (data.dueDate !== undefined && data.dueDate !== null) data.dueDate = time.date(data.dueDate);
+  if (data.workDate !== undefined && data.workDate !== null) data.workDate = time.date(data.workDate);
+  if (data.templateId) await find("shiftTemplate", id(data.templateId), tx);
+  if (data.status === "done" && data.requirePhoto && !data.proofPhotoUrl) fail("Công việc yêu cầu ảnh minh chứng trước khi hoàn thành");
+  return data;
 }
-
-async function getShiftById(id) {
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      const row = await prisma.shift.findUnique({ where: { id } });
-      if (row) return (await markMissedShifts([row]))[0];
-    } catch (err) {
-      console.error("[work-service] Lỗi prisma.shift.findUnique:", err);
-      throw new InternalServerError("Không đọc được ca làm việc từ CSDL", err);
-    }
+async function listTasks(query = {}, caller) {
+  requireCaller(caller);
+  const output = [];
+  if (query.workDate) time.day(query.workDate);
+  for (const task of await rows("task")) {
+    if (query.status && task.status !== query.status || query.assignedTo && task.assignedTo !== query.assignedTo || query.workDate && (!task.workDate || time.day(task.workDate) !== query.workDate)) continue;
+    try { await taskScope(task, caller); output.push(task); } catch (error) { if (error.status !== 403) throw error; }
   }
-  const row = memoryShifts.find((s) => s.id === id) || null;
-  if (!row) return null;
-  return (await markMissedShifts([row]))[0];
+  return output;
 }
-
-async function getTaskById(id) {
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      const row = await prisma.task.findUnique({ where: { id } });
-      if (row) return row;
-    } catch (err) {
-      console.error("[work-service] Lỗi prisma.task.findUnique:", err);
-      throw new InternalServerError("Không đọc được tác vụ từ CSDL", err);
-    }
-  }
-  return memoryTasks.find((t) => t.id === id) || null;
+async function createTask(payload, caller) {
+  manager(caller); const data = fields(payload, TASK_FIELDS);
+  return atomic(async (tx) => {
+    await validateTask(data, caller, tx);
+    if (data.status === "done") fail("Tạo công việc mới ở trạng thái chưa hoàn thành");
+    return create("task", { ...data, assignedTo: data.assignedTo || null, assignedBy: caller.userId, assignedByName: caller.name,
+      status: data.status || "pending", priority: data.priority || "normal", requirePhoto: data.requirePhoto || false }, tx);
+  });
 }
-
-async function listTemplates() {
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      return await prisma.shiftTemplate.findMany({ orderBy: { createdAt: "asc" } });
-    } catch (err) {
-      console.error("[work-service] Lỗi prisma.shiftTemplate.findMany:", err);
-      throw new InternalServerError("Không đọc được khung ca mẫu từ CSDL", err);
-    }
-  }
-  return memoryTemplates;
+async function getTaskById(key, caller) { const task = await find("task", id(key)); await taskScope(task, caller); return task; }
+async function updateTask(key, payload, caller) {
+  const current = await getTaskById(key, caller);
+  const data = fields(payload, isPrivileged(caller) ? TASK_FIELDS : ["status", "proofPhotoUrl"]);
+  return atomic(async (tx) => {
+    const live = await find("task", key, tx);
+    if (live.status === "done" && !isPrivileged(caller)) throw new ConflictError("Công việc đã được hoàn thành");
+    const validated = await validateTask({ ...current, ...data }, isPrivileged(caller) ? caller : { ...caller, internal: true }, tx);
+    const changed = { ...data };
+    for (const field of ["branchId", "workDate", "dueDate"]) if (validated[field] !== undefined) changed[field] = validated[field];
+    if (data.proofPhotoUrl) { changed.photoSubmittedBy = caller.userId; changed.photoSubmittedAt = new Date(Date.now()); }
+    if (data.status === "done") changed.completedAt = new Date(Date.now());
+    else if (data.status) changed.completedAt = null;
+    return update("task", key, changed, tx);
+  });
 }
-
-async function createTemplate(payload) {
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      return await prisma.shiftTemplate.create({ data: payload });
-    } catch (err) {
-      console.error("[work-service] Lỗi prisma.shiftTemplate.create:", err);
-      // listTemplates chỉ đọc memoryTemplates khi Prisma bằng null, nên khung ca
-      // rơi xuống memory sẽ biến mất ngay. Phải ném lỗi ghi DB.
-      throw err;
-    }
-  }
-  const row = { id: uid("st"), ...payload };
-  memoryTemplates.push(row);
-  return row;
+async function deleteTask(key, caller) {
+  manager(caller); const row = await getTaskById(key, caller);
+  await atomic((tx) => remove("task", key, tx));
+  await IntegrationClient.deleteFileByUrl(row.proofPhotoUrl); return { ok: true };
 }
-
-async function updateTemplate(id, payload) {
-  // Chỉ nhận field đã biết: client gửi field lạ sẽ làm Prisma lỗi 500.
-  const data = {};
-  for (const k of ["name", "startTime", "endTime"]) {
-    if (payload[k] !== undefined) data[k] = payload[k];
-  }
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      return await prisma.shiftTemplate.update({ where: { id }, data });
-    } catch (err) {
-      // P2025 = không có dòng để sửa -> 404; lỗi DB khác phải ném lên 500.
-      if (String(err.code) === "P2025") return null;
-      console.error("[work-service] Lỗi prisma.shiftTemplate.update:", err);
-      throw err;
-    }
-  }
-  const idx = memoryTemplates.findIndex((t) => t.id === id);
-  if (idx < 0) return null;
-  memoryTemplates[idx] = { ...memoryTemplates[idx], ...data };
-  return memoryTemplates[idx];
-}
-
-async function deleteTemplate(id) {
-  const prisma = database.getPrisma();
-  if (prisma) {
-    try {
-      await prisma.shiftTemplate.delete({ where: { id } });
-      return true;
-    } catch (err) {
-      // P2025 = không có dòng để xóa -> 404; lỗi DB khác phải ném lên 500.
-      if (String(err.code) === "P2025") return false;
-      console.error("[work-service] Lỗi prisma.shiftTemplate.delete:", err);
-      throw err;
-    }
-  }
-  const idx = memoryTemplates.findIndex((t) => t.id === id);
-  if (idx < 0) return false;
-  memoryTemplates.splice(idx, 1);
-  return true;
-}
-
-module.exports = {
-  ensureSeeded,
-  listShifts,
-  createShift,
-  updateShift,
-  deleteShift,
-  registerShift,
-  unregisterShift,
-  listRegistrations,
-  deleteRegistration,
-  getShiftById,
-  getConfig,
-  updateConfig,
-  checkin,
-  checkout,
-  listAttendance,
-  listTasks,
-  createTask,
-  updateTask,
-  deleteTask,
-  getTaskById,
-  listTemplates,
-  createTemplate,
-  updateTemplate,
-  deleteTemplate,
-};
+module.exports = { getConfig, updateConfig, listTemplates, createTemplate, updateTemplate, deleteTemplate,
+  listShifts, createShift, updateShift, deleteShift, getShiftById, registerShift, listRegistrations, deleteRegistration,
+  preflight, checkin, checkout, doubleAttendance, saveAttendance, listAttendance,
+  listTasks, createTask, updateTask, deleteTask, getTaskById };

@@ -1,10 +1,3 @@
 "use strict";
-
-// Seed tối thiểu: tài khoản công ty đủ số dư demo.
-const PayrollService = require("../src/services/PayrollService");
-
-async function ensureSeeded() {
-  return PayrollService.ensureSeeded();
-}
-
-module.exports = { ensureSeeded };
+// Không tạo tài khoản/số dư giả khi khởi động. Seed chủ động sau khi migration được duyệt.
+if (require.main === module) console.log("Payroll không có dữ liệu mẫu bắt buộc; tạo tài khoản nguồn bằng API quản trị.");

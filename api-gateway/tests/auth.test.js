@@ -85,3 +85,41 @@ test("token hết hạn trả 401", () => {
   assert.equal(passed, false);
   assert.equal(res.statusCode, 401);
 });
+
+test("danh tính giữ riêng userId/employeeId và dùng branchId UUID", () => {
+  const token = jwt.sign({ userId: "user-1", employeeId: "employee-2", branchId: "branch-3", role: "manager" }, process.env.JWT_SECRET);
+  const req = mockReq({ token });
+  let passed = false;
+  createAuthMiddleware({ publicPaths: [] })(req, mockRes(), () => { passed = true; });
+  assert.equal(passed, true);
+  assert.equal(req.user.employeeId, "employee-2");
+  assert.equal(req.user.branchId, "branch-3");
+  assert.equal(req.user.branchSlug, undefined);
+});
+
+test("staff chỉ dùng token mobile qua Bearer, không dùng cookie web", () => {
+  const middleware = createAuthMiddleware({ publicPaths: [] });
+  for (const clientPlatform of [undefined, "web", "mobile"]) {
+    const token = jwt.sign({ userId: "u-1", employeeId: "e-2", role: "staff", clientPlatform }, process.env.JWT_SECRET);
+    const req = mockReq({ token });
+    const res = mockRes();
+    let passed = false;
+    middleware(req, res, () => { passed = true; });
+    assert.equal(passed, clientPlatform === "mobile");
+    if (!passed) assert.equal(res.statusCode, 403);
+    const cookieReq = mockReq();
+    cookieReq.cookies["hrm-session"] = token;
+    const cookieRes = mockRes();
+    middleware(cookieReq, cookieRes, () => assert.fail("Staff không được dùng cookie web"));
+    assert.equal(cookieRes.statusCode, 403);
+  }
+});
+
+test("token thiếu người dùng hoặc sai vai trò bị chặn", () => {
+  for (const payload of [{ role: "admin" }, { userId: "u-1", role: "superuser" }]) {
+    const res = mockRes();
+    createAuthMiddleware({ publicPaths: [] })(mockReq({ token: jwt.sign(payload, process.env.JWT_SECRET) }), res,
+      () => assert.fail("Không cho qua danh tính sai"));
+    assert.equal(res.statusCode, 401);
+  }
+});

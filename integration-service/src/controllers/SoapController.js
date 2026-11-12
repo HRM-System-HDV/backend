@@ -1,10 +1,12 @@
 "use strict";
 
 const SoapService = require("../services/SoapService");
-const PayrollClient = require("../clients/PayrollClient");
+const clients = require("../clients/ServiceClient");
+const {actor,admin} = require("../utils/access");
+const config = require("../config");
 
 function sendWsdl(_req, res) {
-  const wsdl = SoapService.buildWsdl("http://localhost:4005/soap/payroll");
+  const wsdl = SoapService.buildWsdl(`${config.publicBaseUrl}/soap/payroll`);
   res.status(200).set("Content-Type", "text/xml; charset=utf-8").send(wsdl);
 }
 
@@ -26,19 +28,12 @@ async function handlePayout(req, res) {
   }
   let result;
   try {
-    result = await PayrollClient.createPayout(parsed.data);
+    const who=actor(req);admin(who);
+    result = await clients.payout(parsed.data,who);
   } catch (e) {
-    console.warn("[integration-service] Gọi payroll-service thất bại:", e.message);
-    return sendFault(res, "Không kết nối được dịch vụ chi lương", 502);
+    return sendFault(res,e.message,e.status || 502);
   }
-  const body = result.body || {};
-  if (result.status === 422 || body.error?.code === "INSUFFICIENT_FUNDS") {
-    return sendFault(res, "Số dư không đủ", 500);
-  }
-  if (result.status >= 400 || body.error) {
-    return sendFault(res, body.error?.message || "Tạo lệnh chi thất bại", 500);
-  }
-  const payout = body.data || {};
+  const payout = result;
   return res
     .status(200)
     .set("Content-Type", "text/xml; charset=utf-8")

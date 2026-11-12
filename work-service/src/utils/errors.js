@@ -37,4 +37,9 @@ class ForbiddenError extends Error {
   }
 }
 
-module.exports = { ValidationError, NotFoundError, ForbiddenError, InternalServerError };
+class ConflictError extends Error {
+  constructor(message = "Dữ liệu đã tồn tại hoặc vừa thay đổi, vui lòng tải lại") {
+    super(message); this.status = 409; this.code = "DUPLICATE_RESOURCE";
+  }
+}
+module.exports = { ValidationError, NotFoundError, ForbiddenError, InternalServerError, ConflictError };

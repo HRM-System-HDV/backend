@@ -1,6 +1,13 @@
 // Prisma schema — integration-service (Port 4005)
 // Database hrm_integration trên Supabase Postgres riêng (single-tenant, không tenantId).
-
+//
+// Quy tắc định danh (chốt 12/11/2026):
+//  - id: UUID (uuid(7)) cho mọi khóa chính và khóa ngoại.
+//  - employeeId / branchId / sourceShiftId / targetShiftId / senderId / reviewedBy
+//    là UUID do service sở hữu dữ liệu đó cấp — không có FK xuyên DB
+//    (docs/RULES.md §6).
+//  - KHÔNG có cột slug nào: chi nhánh được tham chiếu bằng branches.id.
+//  - Ngày: DateTime @db.Date.
 generator client {
   provider = "prisma-client-js"
 }
@@ -10,212 +17,246 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model Request {
-  id               String   @id @default(cuid())
-  type             String   // leave | advance | shift_swap | work_supplement
-  employeeId       String
-  targetEmployeeId String?  // Nhân viên được nhờ làm thay / đổi ca (người phản hồi)
-  branchSlug       String?
-  title            String
-  content          String
-  attachmentUrl    String?
-  status           String   @default("pending") // pending | approved | rejected
-  reviewedBy       String?
-  reviewNote       String?
-  sourceShiftId    String?
-  targetShiftId    String?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+// Quy tắc nghiệp vụ; CHECK/index bổ sung nằm trong migration của service:
+// - Mọi loại Request chỉ là mẫu đơn: duyệt/chấp nhận không tự sửa lịch, chấm công,
+//   lương hay thanh toán. Người có quyền thực hiện nội dung ở chức năng tương ứng.
+// - leave: bắt buộc hai ngày nghỉ, ngày kết thúc >= ngày bắt đầu.
+// - advance: bắt buộc advanceAmount > 0.
+// - shift_swap: bắt buộc sourceShiftId và targetEmployeeId; targetShiftId có thể
+//   để trống nếu nhờ làm thay. Service kiểm tra quyền sở hữu và tính hợp lệ của ca.
+//   Chụp shiftSwapMode khi tạo đơn để đổi cấu hình không đổi đơn đang chờ.
+//   manager_approval: quản lý duyệt; mutual_acceptance: người được nhờ đồng ý/từ chối.
+//   Người tạo đơn đã thể hiện sự đồng ý khi gửi; không giới hạn số lần đổi ca.
+// - work_supplement: bắt buộc sourceShiftId và ít nhất một giờ đề nghị;
+//   nếu có cả hai giờ thì requestedCheckOut >= requestedCheckIn.
+//   Chỉ lưu/gửi/duyệt đơn; không tự ghi giờ vào/ra hoặc thay đổi lương khi duyệt.
+// - Chỉ điền dữ liệu nghiệp vụ tương ứng với type; các trường loại khác để null.
+// - approved/rejected: bắt buộc reviewedBy và reviewedAt, pending chưa có người xử lý.
+// - Task cá nhân không có bước nhận việc; Request chỉ dùng cho các mẫu đơn đã khai báo.
+// - Đơn đổi ca/làm thay: nhân viên đích đã có ca cùng ngày/ca mẫu thì không được chọn/gửi đơn.
+// CHECK/index tương ứng đã khai báo trong migration 20261112230000_hrm_uuid_redesign.
 
+model Request {
+  id                String         @id @default(uuid(7)) @db.Uuid
+  type              RequestType
+  employeeId        String         @db.Uuid
+  targetEmployeeId  String?        @db.Uuid // Nhân viên được nhờ làm thay / đổi ca
+  branchId          String?        @db.Uuid // branches.id của organization-service
+  title             String
+  content           String
+  attachmentUrl     String?
+  // Nghỉ theo ngày, bao gồm cả hai đầu mút; đồ án chưa hỗ trợ nghỉ theo buổi.
+  leaveStartDate    DateTime?      @db.Date
+  leaveEndDate      DateTime?      @db.Date
+  advanceAmount     Decimal?       @db.Decimal(15, 0)
+  // Giờ vào/ra đề nghị bổ sung; sourceShiftId xác định ca cần bổ sung.
+  requestedCheckIn  DateTime?      @db.Timestamptz
+  requestedCheckOut DateTime?      @db.Timestamptz
+  reviewedAt        DateTime?      @db.Timestamptz
+  status            RequestStatus  @default(pending)
+  // Người xử lý: admin/quản lý hoặc nhân viên đích trong chế độ mutual_acceptance.
+  // users.id của identity-service + tên để hiển thị.
+  reviewedBy        String?        @db.Uuid
+  reviewedByName    String?
+  reviewNote        String?
+  sourceShiftId     String?        @db.Uuid // shifts.id của work-service
+  targetShiftId     String?        @db.Uuid // shifts.id của work-service
+  // Chỉ dùng cho shift_swap; các loại đơn khác để null.
+  shiftSwapMode     ShiftSwapMode?
+  createdAt         DateTime       @default(now())
+
+  notifications Notification[]
+
+  @@index([employeeId])
+  @@index([targetEmployeeId])
+  @@index([branchId])
+  @@index([status])
   @@map("requests")
 }
 
 model Notification {
-  id               String   @id @default(cuid())
-  targetEmployeeId String?  // null = toàn hệ thống broadcast
-  branchSlug       String?
+  id               String       @id @default(uuid(7)) @db.Uuid
+  // Gửi chung = tạo một dòng cho từng người nhận, isRead độc lập.
+  targetEmployeeId String       @db.Uuid
+  // Phạm vi nội dung: chi nhánh cụ thể hoặc null = toàn thể; mỗi dòng vẫn một người nhận.
+  branchId         String?      @db.Uuid
   title            String
   body             String
-  isRead           Boolean  @default(false)
+  isRead           Boolean      @default(false)
+  // Dữ liệu phụ linh hoạt theo từng loại thông báo: vd
+  // { shiftName, shiftDate, shiftTime, shiftHours, senderPhone }.
   metadata         Json?
-  requestType      String?
-  shiftName        String?
-  shiftDate        String?
-  shiftTime        String?
-  shiftHours       String?
+  // Loại đơn liên quan — app dùng để điều hướng tới đúng màn hình.
+  requestType      RequestType?
+  // requests.id của đơn liên quan. Để RIÊNG là cột UUID có kiểu, không nhét vào
+  // metadata: đây là con trỏ điều hướng (app bấm thông báo -> mở đúng đơn) và là
+  // quan hệ thật, cần lọc được. Phần TỬ TẾ chỉ để hiển thị (shiftName/shiftDate/
+  // shiftTime/shiftHours/senderPhone) thì mới nằm trong metadata.
+  requestId        String?      @db.Uuid
+  // Người gửi: users.id của identity-service + tên để hiển thị.
+  senderId         String?      @db.Uuid
   senderName       String?
-  senderRole       String?
-  senderPhone      String?
-  createdAt        DateTime @default(now())
+  createdAt        DateTime     @default(now())
 
+  request Request? @relation(fields: [requestId], references: [id], onDelete: SetNull)
+
+  @@index([targetEmployeeId])
+  @@index([branchId])
+  @@index([requestId])
+  @@index([targetEmployeeId, isRead, createdAt])
   @@map("notifications")
 }
 
-// Cài đặt nhận thông báo của từng người dùng (id = x-user-id do gateway xác thực).
-// Khóa phải trùng khớp 10 switch trong mobile notif_settings.dart.
+// Cài đặt nhận thông báo của từng người dùng.
+// Khóa chính là user_id = users.id của identity-service (quan hệ 1:1).
 model NotificationSetting {
-  id                     String   @id
-  checkInBefore1Hour     Boolean  @default(true)
-  checkInBefore30Min     Boolean  @default(true)
-  checkInBefore10Min     Boolean  @default(true)
-  checkOutBefore10Min    Boolean  @default(true)
+  userId                   String  @id @db.Uuid
+  checkInBefore1Hour       Boolean @default(true)
+  checkInBefore30Min       Boolean @default(true)
+  checkInBefore10Min       Boolean @default(true)
+  checkOutBefore10Min      Boolean @default(true)
   missedCheckOutAfter10Min Boolean @default(true)
   missedCheckOutAfter30Min Boolean @default(true)
   missedCheckOutAfter1Hour Boolean @default(true)
-  tabNotificationAlert   Boolean  @default(true)
-  soundEnabled           Boolean  @default(true)
-  vibrateEnabled         Boolean  @default(true)
-  updatedAt              DateTime @updatedAt
+  tabNotificationAlert     Boolean @default(true)
+  soundEnabled             Boolean @default(true)
+  vibrateEnabled           Boolean @default(true)
 
   @@map("notification_settings")
 }
 
+// Tối đa một dòng: migration có CHECK isSingleton = true kết hợp UNIQUE.
+// Hiện UNIQUE Boolean chỉ giới hạn tối đa hai dòng. Seed tạo cấu hình sau.
 model SoapGatewayConfig {
-  id              String   @id @default("default")
+  id              String    @id @default(uuid(7)) @db.Uuid
+  isSingleton     Boolean   @unique @default(true)
+  // URL bao gồm port nếu không dùng port mặc định của giao thức.
   endpointUrl     String
   wsdlUrl         String
   serviceName     String
-  port            Int      @default(8443)
   securityMode    String
-  allowedIPs      String[]
-  status          String   @default("unknown")
-  lastPingTime    String?
+  status          String    @default("unknown")
+  lastPingTime    DateTime?
   avgResponseTime String?
-  certExpiry      String?
-  channel         String?  @default("Gateway (REST/SOAP)")
+  certExpiry      DateTime?
 
   @@map("soap_gateway_configs")
 }
 
 model News {
-  id        String   @id @default(cuid())
-  title     String
-  summary   String
-  content   String
-  date      String   // DD/MM/YYYY
-  tag       String
-  tagTone   String   @default("primary") // danger | warning | success | primary | gray
-  pinned    Boolean  @default(false)
-  branch    String   @default("Toàn công ty")
-  author    String?  // người đăng (lấy từ danh tính gateway ký)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id          String   @id @default(uuid(7)) @db.Uuid
+  title       String
+  summary     String
+  content     String
+  publishDate DateTime @db.Date
+  tag         String
+  pinned      Boolean  @default(false)
+  // branches.id — NULL nghĩa là đăng cho toàn công ty.
+  branchId    String?  @db.Uuid
+  // Người đăng: users.id + tên hiển thị.
+  authorId    String?  @db.Uuid
+  authorName  String?
+  createdAt   DateTime @default(now())
 
+  @@index([branchId])
   @@map("news")
 }
 
 model Regulation {
-  id            String   @id @default(cuid())
-  code          String
-  title         String
-  category      String
-  summary       String
-  content       String
-  status        String   @default("hiệu lực") // hiệu lực | dự thảo | hết hiệu lực
-  scope         String   @default("Toàn công ty")
-  effectiveDate String   // DD/MM/YYYY
-  expiryDate    String?
-  version       String   @default("1.0")
-  pinned        Boolean  @default(false)
-  attachments   Int      @default(0)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id             String    @id @default(uuid(7)) @db.Uuid
+  regulationCode String    @unique // QD-001
+  title          String
+  category       String
+  summary        String
+  content        String
+  status         String    @default("hiệu lực") // hiệu lực | dự thảo | hết hiệu lực
+  // branches.id — NULL nghĩa là áp dụng toàn công ty.
+  scopeBranchId  String?   @db.Uuid
+  effectiveDate  DateTime  @db.Date
+  expiryDate     DateTime? @db.Date
+  version        String    @default("1.0")
+  pinned         Boolean   @default(false)
+  createdAt      DateTime  @default(now())
 
+  // Tệp đính kèm thật (thay cho cột đếm "attachments" dạng số trước đây).
+  files FileAsset[]
+
+  @@index([scopeBranchId])
   @@map("regulations")
 }
 
 model WifiConfig {
-  id        String   @id @default(cuid())
+  id        String   @id @default(uuid(7)) @db.Uuid
   ssid      String
   bssid     String
-  branch    String   // slug chi nhánh, ví dụ HN-1, HN-2
+  // branches.id của organization-service (trước đây lưu slug chi nhánh).
+  branchId  String   @db.Uuid
   status    String   @default("hoạt động") // hoạt động | vô hiệu hóa
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
 
+  @@index([branchId])
   @@map("wifi_configs")
 }
 
-// Backlog model chuẩn hóa Prisma ORM (P2-5c)
+// Nhật ký thao tác hệ thống.
 model Backlog {
-  id          String    @id @default(cuid())
-  timestamp   String
-  userName    String    @map("user_name")
-  userRole    String?   @default("staff") @map("user_role")
-  action      String
-  actionLabel String    @map("action_label")
-  module      String
-  targetName  String    @map("target_name")
-  description String?
-  createdAt   DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+  id         String   @id @default(uuid(7)) @db.Uuid
+  userId     String?  @db.Uuid // users.id của identity-service
+  userName   String   @map("user_name")
+  // Không có default "staff": nhật ký thao tác ghi sai vai trò thì mất giá trị
+  // bằng chứng. Không lấy được vai trò thì để trống, không bịa.
+  userRole   String?  @map("user_role")
+  action     String
+  module     String
+  entityType String   @map("entity_type") // employee, shift, request, ...
+  entityId   String   @map("entity_id") // UUID hoặc khóa cấu hình dạng chuỗi
+  targetName String   @map("target_name")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz
 
+  @@index([userId])
+  @@index([module, entityType, entityId, createdAt])
   @@map("backlogs")
 }
 
 // Đăng ký file upload nội bộ — phục vụ đối soát ảnh mồ côi, không đọc xuyên DB.
+// id = khóa UUID; public_id là đường dẫn dùng trong URL (vd "hrm/avatars/<uuid>").
 model FileAsset {
-  id          String    @id // publicId, vd "hrm/avatars/<uuid>"
-  folder      String
-  storagePath String    // tương đối trong STORAGE_DIR, vd "hrm/avatars/<uuid>.jpg"
-  mime        String
-  bytes       Int
-  width       Int       @default(0)
-  height      Int       @default(0)
-  uploadedBy  String?   // x-user-id do gateway xác thực
-  branchSlug  String?   // chi nhánh của người upload (x-branch-slug): quản lý chỉ xem được file cùng chi nhánh
-  createdAt   DateTime  @default(now())
-  deletedAt   DateTime? // xóa mềm để đối soát
+  id           String      @id @default(uuid(7)) @db.Uuid
+  publicId     String      @unique @map("public_id")
+  folder       String
+  storagePath  String      @map("storage_path") // tương đối trong STORAGE_DIR
+  mime         String
+  bytes        Int
+  uploadedBy   String?     @db.Uuid // users.id của identity-service
+  branchId     String?     @db.Uuid // branches.id của organization-service
+  // Chủ sở hữu nghiệp vụ của tệp — FK THẬT trong cùng DB. Thay cho cột đếm
+  // "attachments" dạng số trên regulations (số ảo, không có bảng nào gắn với nó):
+  // tệp đính kèm là bản ghi thật, đếm lúc đọc.
+  regulation   Regulation? @relation(fields: [regulationId], references: [id], onDelete: Cascade)
+  regulationId String?     @db.Uuid // regulations.id
+  createdAt    DateTime    @default(now())
+  deletedAt    DateTime? // xóa mềm để đối soát
 
+  @@index([uploadedBy])
+  @@index([branchId])
+  @@index([regulationId])
   @@map("file_assets")
 }
 
-// Kho lưu trữ đơn từ cũ — mirror trường Request, giữ id gốc để khôi phục.
-model ArchivedRequest {
-  id               String   @id // id gốc của Request
-  type             String
-  employeeId       String
-  targetEmployeeId String?
-  branchSlug       String?
-  title            String
-  content          String
-  attachmentUrl    String?
-  status           String
-  reviewedBy       String?
-  reviewNote       String?
-  sourceShiftId    String?
-  targetShiftId    String?
-  createdAt        DateTime
-  updatedAt        DateTime
-  archivedAt       DateTime @default(now())
-  archiveBatchId   String
-
-  @@index([archivedAt])
-  @@index([createdAt])
-  @@map("archived_requests")
+enum RequestType {
+  leave
+  advance
+  shift_swap
+  work_supplement
 }
 
-// Kho lưu trữ thông báo cũ — mirror trường Notification, giữ id gốc để khôi phục.
-model ArchivedNotification {
-  id               String   @id // id gốc của Notification
-  targetEmployeeId String?
-  branchSlug       String?
-  title            String
-  body             String
-  isRead           Boolean
-  metadata         Json?
-  requestType      String?
-  shiftName        String?
-  shiftDate        String?
-  shiftTime        String?
-  shiftHours       String?
-  senderName       String?
-  senderRole       String?
-  senderPhone      String?
-  createdAt        DateTime
-  archivedAt       DateTime @default(now())
-  archiveBatchId   String
+enum RequestStatus {
+  pending
+  approved
+  rejected
+}
 
-  @@index([archivedAt])
-  @@index([createdAt])
-  @@map("archived_notifications")
+enum ShiftSwapMode {
+  manager_approval
+  mutual_acceptance
 }

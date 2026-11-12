@@ -1,105 +1,49 @@
 "use strict";
-
+process.env.DATABASE_URL = "";
 const assert = require("node:assert/strict");
-const { test } = require("node:test");
-
-test("CRUD branches + departments + employees validation", async () => {
-  const app = require("../../src/app");
-  const server = app.listen(0);
-  await new Promise((r) => server.on("listening", r));
-  const port = server.address().port;
-  const base = `http://localhost:${port}`;
-  const suffix = `${Date.now()}`;
-
-  try {
-    // Branches: khởi đầu là mảng (không phụ thuộc seed)
-    let res = await fetch(`${base}/api/branches`);
-    let body = await res.json();
-    assert.equal(res.status, 200);
-    assert.ok(Array.isArray(body.data));
-
-    // Tạo chi nhánh mới qua API (mã CN-xxxx do hệ thống tự sinh)
-    res = await fetch(`${base}/api/branches`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: `Chi nhánh ${suffix}` }),
-    });
-    body = await res.json();
-    assert.equal(res.status, 201);
-    const branchSlug = body.data.slug;
-    assert.ok(/^CN-\d{4}$/.test(branchSlug));
-
-    // Danh sách phải chứa chi nhánh vừa tạo
-    res = await fetch(`${base}/api/branches`);
-    body = await res.json();
-    assert.equal(res.status, 200);
-    assert.ok(body.data.length >= 1);
-    assert.ok(body.data.some((b) => b.slug === branchSlug));
-
-    // Client cố gửi slug -> hệ thống bỏ qua và tự sinh mã riêng
-    res = await fetch(`${base}/api/branches`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "Trùng", slug: branchSlug }),
-    });
-    body = await res.json();
-    assert.equal(res.status, 201);
-    assert.ok(body.data.slug !== branchSlug);
-
-    // Departments: tạo + lọc danh sách (mã PB-xxxx do hệ thống tự sinh)
-    res = await fetch(`${base}/api/departments`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: `Phòng ${suffix}` }),
-    });
-    body = await res.json();
-    assert.equal(res.status, 201);
-    assert.ok(/^PB-\d{4}$/.test(body.data.code));
-
-    res = await fetch(`${base}/api/departments`);
-    body = await res.json();
-    assert.equal(res.status, 200);
-    assert.ok(body.data.length >= 1);
-
-    // Employees: tạo staff + filter theo systemRole.
-    // Dịch vụ tin header do gateway truyền xuống: admin thì thấy mọi chi nhánh.
-    const asAdmin = { "Content-Type": "application/json", "x-user-role": "admin", "x-user-id": "admin-test" };
-    res = await fetch(`${base}/api/employees`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "Nhân viên test", email: `staff-${suffix}@company.com`, systemRole: "staff", branchSlug }),
-    });
-    body = await res.json();
-    assert.equal(res.status, 201);
-
-    res = await fetch(`${base}/api/employees?systemRole=staff`, { headers: asAdmin });
-    body = await res.json();
-    assert.equal(res.status, 200);
-    assert.ok(body.data.every((e) => e.systemRole === "staff"));
-    assert.ok(body.data.length >= 1);
-
-    // Không có danh tính từ gateway -> không thấy hồ sơ của ai (không mặc định admin).
-    res = await fetch(`${base}/api/employees?systemRole=staff`);
-    body = await res.json();
-    assert.equal(res.status, 200);
-    assert.equal(body.data.length, 0);
-
-    // Email trùng -> 409
-    res = await fetch(`${base}/api/employees`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "Trùng", email: "admin@company.com", systemRole: "staff" }),
-    });
-    assert.equal(res.status, 409);
-
-    // systemRole sai -> 400
-    res = await fetch(`${base}/api/employees`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "Sai", email: `sai-${suffix}@company.com`, systemRole: "boss" }),
-    });
-    assert.equal(res.status, 400);
-  } finally {
-    server.close();
-  }
+const {test,beforeEach} = require("node:test");
+const request = require("supertest");
+const identity = require("../../src/clients/IdentityClient");
+identity.syncEmployeeToIdentity = async()=>({ok:true});
+const app = require("../../src/app");
+const service = require("../../src/services/OrgService");
+const config = require("../../src/config");
+const admin={"x-user-id":"00000000-0000-4000-8000-000000000001","x-user-role":"admin"};
+const body={name:"Nguyễn Văn A",email:"a@company.test",salaryType:"monthly",salary:"7800000",standardWorkDays:26};
+beforeEach(()=>service.resetForTests());
+test("unauthenticated and staff catalog writes are denied",async()=> {
+  assert.equal((await request(app).get("/api/employees")).status,401);
+  assert.equal((await request(app).post("/api/branches").set({...admin,"x-user-role":"staff"}).send({name:"CN"})).status,403);
+  assert.equal((await request(app).post("/api/positions").set({...admin,"x-user-role":"manager"}).send({name:"Dev",positionCode:"DEV"})).status,403);
+});
+test("catalog UUID relations and direct employee lifecycle over HTTP",async()=> {
+  const branch=await request(app).post("/api/branches").set(admin).send({name:"CN"}); assert.equal(branch.status,201);
+  const dept=await request(app).post("/api/departments").set(admin).send({name:"IT",departmentCode:"IT"}); assert.equal(dept.status,201);
+  const pos=await request(app).post("/api/positions").set(admin).send({name:"Dev",positionCode:"DEV",departmentId:dept.body.data.id}); assert.equal(pos.status,201);
+  const created=await request(app).post("/api/employees").set(admin).send({...body,branchId:branch.body.data.id,departmentId:dept.body.data.id,positionId:pos.body.data.id});
+  assert.equal(created.status,201); const id=created.body.data.id;
+  const fetched=await request(app).get(`/api/employees/${id}`).set("x-internal-token",config.internalToken);
+  assert.equal(fetched.status,200); assert.equal(fetched.body.data.salary,"7800000");
+  const listed=await request(app).get(`/api/employees?branchId=${branch.body.data.id}`).set("x-internal-token",config.internalToken);
+  assert.equal(listed.body.data.length,1);
+  const deleted=await request(app).delete(`/api/employees/${id}`).set(admin);
+  assert.equal(deleted.status,200); assert.equal(deleted.body.data.status,"nghỉ việc");
+  assert.equal((await request(app).get(`/api/employees/${id}`).set(admin)).status,200);
+});
+test("staff only accesses own profile; role injection and legacy payload rejected",async()=> {
+  const a=(await request(app).post("/api/employees").set(admin).send(body)).body.data;
+  const b=(await request(app).post("/api/employees").set(admin).send({...body,email:"b@company.test"})).body.data;
+  const staff={...admin,"x-user-role":"staff","x-employee-id":a.id};
+  assert.equal((await request(app).get(`/api/employees/${b.id}`).set(staff)).status,403);
+  assert.equal((await request(app).get("/api/employees").set(staff)).body.data.length,1);
+  assert.equal((await request(app).put(`/api/employees/${a.id}`).set(staff).send({salary:"10000000"})).status,403);
+  assert.equal((await request(app).put(`/api/employees/${a.id}`).set(staff).send({phone:"0901234567"})).status,200);
+  assert.equal((await request(app).put(`/api/employees/${a.id}`).set(admin).send({systemRole:"admin"})).status,400);
+  assert.equal((await request(app).get("/api/employees/NV-0001").set(admin)).status,400);
+});
+test("normalized emails unique and merged salary validation runs",async()=> {
+  const created=await request(app).post("/api/employees").set(admin).send(body);
+  assert.equal((await request(app).post("/api/employees").set(admin).send({...body,email:"A@COMPANY.TEST"})).status,409);
+  const result=await request(app).put(`/api/employees/${created.body.data.id}`).set(admin).send({salaryType:"hourly"});
+  assert.equal(result.status,400); assert.equal(result.body.error.code,"VALIDATION_ERROR");
 });

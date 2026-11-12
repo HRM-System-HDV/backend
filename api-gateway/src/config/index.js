@@ -26,7 +26,7 @@ module.exports = {
     { method: "POST", path: "/api/auth/login", exact: true },
     { method: "POST", path: "/api/auth/refresh", exact: true },
     { method: "POST", path: "/api/auth/forgot-password", exact: true },
-    { method: "GET", path: "/soap/payroll", exact: false },
+    { method: "GET", path: "/soap/payroll", exact: true },
   ],
   targets: {
     identity: process.env.IDENTITY_URL || "http://localhost:4001",

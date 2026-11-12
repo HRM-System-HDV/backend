@@ -17,7 +17,6 @@ app.get("/health", (_req, res) => {
   res.status(200).json({ status: "ok", service: config.serviceName, time: new Date().toISOString() });
 });
 
-app.use("/api/archive/work", require("./routes/archiveRoutes"));
 app.use("/api", workRoutes);
 
 app.use((_req, res) => {

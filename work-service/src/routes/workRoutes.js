@@ -1,42 +1,29 @@
 "use strict";
-
-const express = require("express");
-const WorkController = require("../controllers/WorkController");
-
-const router = express.Router();
-
-// Shifts — khai báo route cụ thể trước route :id
-router.get("/shifts/templates", WorkController.listTemplates);
-router.post("/shifts/templates", WorkController.createTemplate);
-router.put("/shifts/templates/:id", WorkController.updateTemplate);
-router.delete("/shifts/templates/:id", WorkController.deleteTemplate);
-router.get("/shifts/registrations", WorkController.listRegistrations);
-router.post("/shifts/register", WorkController.registerShift);
-router.post("/shifts/unregister", WorkController.unregisterShift);
-router.delete("/shifts/registrations/:id", WorkController.deleteRegistration);
-router.get("/shifts", WorkController.listShifts);
-router.post("/shifts", WorkController.createShift);
-router.put("/shifts/:id", WorkController.updateShift);
-router.delete("/shifts/:id", WorkController.deleteShift);
-router.post("/shifts/:id/assign", WorkController.assignShift);
-
-// Shift templates (khung ca mẫu)
-router.get("/shift-templates", WorkController.listTemplates);
-router.post("/shift-templates", WorkController.createTemplate);
-router.put("/shift-templates/:id", WorkController.updateTemplate);
-router.delete("/shift-templates/:id", WorkController.deleteTemplate);
-
-// Attendance — config trước để tránh nuốt bởi query
-router.get("/attendance/config", WorkController.getConfig);
-router.put("/attendance/config", WorkController.updateConfig);
-router.post("/attendance/checkin", WorkController.checkin);
-router.post("/attendance/checkout", WorkController.checkout);
-router.get("/attendance", WorkController.listAttendance);
-
-// Tasks
-router.get("/tasks", WorkController.listTasks);
-router.post("/tasks", WorkController.createTask);
-router.put("/tasks/:id", WorkController.updateTask);
-router.delete("/tasks/:id", WorkController.deleteTask);
-
+const router = require("express").Router();
+const c = require("../controllers/WorkController");
+router.get("/shifts/registrations", c.listRegistrations);
+router.post("/shifts/register", c.registerShift);
+router.delete("/shifts/registrations/:id", c.deleteRegistration);
+router.get("/shifts", c.listShifts);
+router.post("/shifts", c.createShift);
+router.get("/shifts/:id", c.getShift);
+router.put("/shifts/:id", c.updateShift);
+router.delete("/shifts/:id", c.deleteShift);
+router.post("/shifts/:id/assign", c.assignShift);
+router.get("/shift-templates", c.listTemplates);
+router.post("/shift-templates", c.createTemplate);
+router.put("/shift-templates/:id", c.updateTemplate);
+router.delete("/shift-templates/:id", c.deleteTemplate);
+router.get("/attendance/config", c.getConfig);
+router.put("/attendance/config", c.updateConfig);
+router.post("/attendance/preflight", c.preflight);
+router.post("/attendance/checkin", c.checkin);
+router.post("/attendance/checkout", c.checkout);
+router.post("/attendance/double", c.doubleAttendance);
+router.put("/attendance/:shiftId", c.saveAttendance);
+router.get("/attendance", c.listAttendance);
+router.get("/tasks", c.listTasks);
+router.post("/tasks", c.createTask);
+router.put("/tasks/:id", c.updateTask);
+router.delete("/tasks/:id", c.deleteTask);
 module.exports = router;

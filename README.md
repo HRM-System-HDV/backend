@@ -1,171 +1,91 @@
-# HRM Enterprise — Core Server (Express Microservices SOA)
+# HRM Backend — SOA
 
-Hệ thống Backend trung tâm cho nền tảng quản trị nhân sự **HRM Enterprise**. Được xây dựng theo kiến trúc **Hướng dịch vụ (SOA / Microservices)**, tuân thủ nguyên tắc **Database-per-Service** với 5 cơ sở dữ liệu PostgreSQL độc lập trên hạ tầng Docker.
+Backend đồ án quản lý nhân sự, triển khai theo [nghiệp vụ đã chốt](../docs/BUSINESS.md) và năm schema Prisma. Đợt tái cấu trúc chỉ thay đổi BE; Web/Mobile cần cập nhật hợp đồng API riêng sau đó.
 
----
+## Các service
 
-## 🏗 Kiến trúc Hệ thống
+| Service | Cổng | DB riêng | Phụ trách |
+|---|---|---|---|
+| api-gateway | 4000 | Không có | JWT, phân quyền route, proxy REST/SOAP |
+| identity-service | 4001 | hrm_identity | Tài khoản, vai trò, phiên và thiết bị |
+| organization-service | 4002 | hrm_organization | Chi nhánh, phòng ban, vị trí, hồ sơ và thỏa thuận lương |
+| work-service | 4003 | hrm_work | Lịch ca, chấm công Wi-Fi/thường/kép, công việc |
+| payroll-service | 4004 | hrm_payroll | Tích lũy lương, xác nhận phiếu, số dư và lệnh chi |
+| integration-service | 4005 | hrm_integration | Mẫu đơn, thông báo, nội dung, Wi-Fi, tệp, nhật ký và SOAP |
 
-```text
-[ Client (Web Portal / Mobile App) ]
-                │
-                ▼ (HTTP REST / Cookies)
-     ┌──────────────────────┐
-     │  API Gateway (:4000) │  (Stateless, JWT Verify, Rate Limit, CORS)
-     └──────────┬───────────┘
-                │ Proxy nội bộ
-   ┌────────────┼────────────┬────────────┬────────────┐
-   ▼            ▼            ▼            ▼            ▼
-Identity   Organization     Work       Payroll    Integration
- (:4001)      (:4002)      (:4003)     (:4004)      (:4005)
-   │            │            │            │            │
-   ▼            ▼            ▼            ▼            ▼
-Postgres     Postgres     Postgres     Postgres     Postgres
- (5433)       (5434)       (5435)       (5436)       (5437)
-```
+Node.js >= 18, Express, Prisma/PostgreSQL. Kiến trúc phẳng Route → Controller → Service → Prisma. Không có repository chung, DB chung hoặc import mã nguồn xuyên service.
 
----
+## Cài đặt và kiểm tra
 
-## 📦 Danh sách Microservices
+Mỗi service có package riêng. Trong `backend/`:
 
-| Service | Port | Database Container | Database Port | Trách nhiệm chính |
-|---|:---:|---|:---:|---|
-| **API Gateway** | `4000` | *Không (Stateless)* | - | Cửa ngõ duy nhất, xác thực JWT tập trung, định tuyến proxy, rate limiting |
-| **Identity Service** | `4001` | `hrm-db-identity` | `5433` | Quản lý tài khoản, mã hóa mật khẩu bcrypt, phiên làm việc, thiết bị |
-| **Organization Service** | `4002` | `hrm-db-organization` | `5434` | Cơ cấu tổ chức, chi nhánh, phòng ban, thông tin nhân sự chi tiết |
-| **Work Service** | `4003` | `hrm-db-work` | `5435` | Ca làm việc mẫu, xếp ca, đăng ký ca, chấm công Wi-Fi, vi phạm, tác vụ |
-| **Payroll Service** | `4004` | `hrm-db-payroll` | `5436` | Tài khoản doanh nghiệp, tổng hợp công, bảng lương, lệnh chi tiền |
-| **Integration Service** | `4005` | `hrm-db-integration` | `5437` | SOAP WSDL ngân hàng, đơn từ, bảng tin, quy chế, Wi-Fi chi nhánh, upload ảnh |
-
----
-
-## 🛠 Công nghệ sử dụng
-
-- **Runtime:** Node.js (>= 18.x)
-- **Framework:** Express.js
-- **ORM & Database:** Prisma ORM, PostgreSQL 16 Alpine
-- **Giao thức & Tích hợp:** HTTP REST API, SOAP/XML WSDL, JWT (`jsonwebtoken`), bcryptjs
-- **Hạ tầng:** Docker & Docker Compose (quản lý 5 cụm cơ sở dữ liệu độc lập)
-
----
-
-## 🌳 Cấu trúc Thư mục Repository
-
-```text
-backend/
-├── docker-compose.yml          # Hạ tầng 5 container PostgreSQL độc lập
-├── package.json                # Root package & scripts
-├── api-gateway/                # API Gateway trung tâm (:4000)
-│   ├── src/                    # Middleware proxy, rate limiter, JWT verify
-│   └── server.js
-├── identity-service/           # Identity Service (:4001)
-│   ├── prisma/                 # Schema & Seed tài khoản
-│   └── src/                    # Controller, Service, Validator, Routes
-├── organization-service/       # Organization Service (:4002)
-│   ├── prisma/                 # Schema chi nhánh, phòng ban, hồ sơ nhân sự
-│   └── src/
-├── work-service/               # Work Service (:4003)
-│   ├── prisma/                 # Schema ca kíp, chấm công, vi phạm
-│   └── src/
-├── payroll-service/            # Payroll Service (:4004)
-│   ├── prisma/                 # Schema bảng lương, tính lương, chi trả
-│   └── src/
-└── integration-service/        # Integration Service (:4005)
-    ├── prisma/                 # Schema đơn từ, thông báo, quy chế, Wi-Fi
-    └── src/                    # SOAP Bank Simulator, REST APIs
-```
-
----
-
-## 🚀 Hướng dẫn Cài đặt & Khởi chạy
-
-### Bước 0: Khởi động 5 Database Containers bằng Docker Compose
-Dự án sử dụng cơ chế Database-per-Service. Mỗi service kết nối tới một node PostgreSQL độc lập trên các cổng từ `5433` đến `5437`.
-
-```bash
-# Khởi động toàn bộ 5 container DB trong nền
-docker compose up -d
-
-# Kiểm tra trạng thái các container (đảm bảo cả 5 container đều Up)
-docker compose ps
-```
-
-### Bước 1: Khởi động API Gateway (Port 4000)
-```bash
-cd api-gateway
-npm install
-npm run dev
-```
-
-### Bước 2: Khởi động các Microservices (Mở các terminal riêng)
-Mỗi service đều có file `.env.example` và file `.env` đã được chuẩn bị sẵn. Hãy tiến hành áp migration (dựng được cả DB trắng, không xóa dữ liệu) và nạp dữ liệu mẫu:
-
-```bash
-# 1. Identity Service (Port 4001)
-cd identity-service
-npm install
-npx prisma migrate deploy
-node prisma/seed.js
-npm run dev
-
-# 2. Organization Service (Port 4002)
-cd organization-service
-npm install
-npx prisma migrate deploy
-node prisma/seed.js
-npm run dev
-
-# 3. Work Service (Port 4003)
-cd work-service
-npm install
-npx prisma migrate deploy
-node prisma/seed.js
-npm run dev
-
-# 4. Payroll Service (Port 4004)
-cd payroll-service
-npm install
-npx prisma migrate deploy
-node prisma/seed.js
-npm run dev
-
-# 5. Integration Service (Port 4005)
-cd integration-service
-npm install
-npx prisma migrate deploy
-npm run dev
-```
-
-### Bước 3: Chạy Kiểm thử (Tests)
-Từng microservice được tích hợp bộ unit test và integration test với Jest:
-
-```bash
-# Chạy test trong thư mục của service tương ứng
+```sh
+npm run install:all
+npm run prisma:generate
 npm test
 ```
 
----
+Các script gốc chạy trên Windows và Unix. Với PowerShell chặn `npm.ps1`, dùng `npm.cmd`.
 
-## 🏦 Tích hợp Cổng Ngân hàng (SOAP Bank Simulator)
+- `prisma:generate` chỉ sinh client, không tạo bảng hoặc sửa dữ liệu.
+- Migration `20261112230000_hrm_uuid_redesign` đã được tạo cho cả năm DB. Nó chỉ thay cấu trúc cũ khi các bảng nghiệp vụ đều trống; nếu có bản ghi thì dừng và yêu cầu migration dữ liệu riêng. Không dùng reset để vượt kiểm tra này.
+- Migration đã áp dụng trên năm DB local trong đợt tái cấu trúc. Triển khai ở môi trường khác dùng `npm run prisma:deploy` sau khi kiểm tra DB đích. Không tự chạy seed để tạo tài khoản/mật khẩu mặc định.
+- Test dùng dữ liệu cô lập, không chứng minh migration hay truy vấn trên DB thật đã chạy thành công.
+- Migration mới chứa các CHECK/index đã chốt. `npm run test:database` kiểm chứng ghi dữ liệu và ràng buộc trên DB cấu hình trong `.env`, rồi rollback toàn bộ bản ghi thử; cần Postgres đang chạy. `npm run test:flow` chạy sáu service HTTP cô lập bằng memory, không kết nối DB thật.
 
-Hệ thống tích hợp giả lập cổng ngân hàng phục vụ đối soát và chi lương tự động:
-- **Lấy WSDL:** `GET http://localhost:4005/soap/payroll?wsdl`
-- **Gửi lệnh chi (SOAP XML):** `POST http://localhost:4005/soap/payroll`
-- **Cơ chế chống trùng (Idempotency):** Mỗi lệnh chi bắt buộc kèm `idempotencyKey`. Nếu nhận trùng key, hệ thống trả về kết quả đối soát `BANK-*` đã lưu thay vì trừ tiền lần 2.
+## Cấu hình và chạy
 
----
+Sao chép `.env.example` thành `.env` riêng của từng service rồi điền giá trị local. Không commit `.env` thật. `docker-compose.yml` chỉ mô tả hạ tầng năm Postgres riêng trên các cổng 5433–5437; không tự khởi chạy hoặc reset DB khi test.
 
-## 🔑 Tài khoản khởi tạo sẵn (Seed Data)
+Trong mỗi service:
 
-| Email | Mật khẩu | Vai trò | Chức vụ |
-|---|---|---|---|
-| `admin@company.com` | `123456` | Admin | Giám đốc điều hành |
-| `manager@company.com` | `123456` | Manager | Quản lý chi nhánh HN-1 |
-| `nhanvien@company.com` | `123456` | Staff | Nhân viên thu ngân HN-1 |
+```sh
+npm run dev
+```
 
----
+Gateway cần các URL Identity/Organization/Work/Payroll/Integration. Mỗi service có `GET /health` trả tên service và thời điểm. Cấu hình DATABASE_URL phải trỏ DB của chính service đó.
 
-## 🔗 Liên kết hệ sinh thái HRM Enterprise
+## Hợp đồng danh tính nội bộ
 
-- **Web Portal (Next.js):** [HRM-QuanLyDuAn/frontend](https://github.com/HRM-QuanLyDuAn/frontend)
-- **Mobile App (Flutter):** [HRM-QuanLyDuAn/mobile](https://github.com/HRM-QuanLyDuAn/mobile)
+Gateway xác thực JWT rồi xóa header danh tính do client tự gửi trước khi chuyển tiếp:
+
+| Header | Giá trị từ token đã xác thực |
+|---|---|
+| x-user-id | User.id của Identity |
+| x-employee-id | Employee.id của Organization; không đồng nhất với User.id |
+| x-branch-id | Branch.id UUID |
+| x-user-role | admin / manager / staff |
+| x-user-email, x-user-name | Thông tin hiển thị người thao tác |
+
+- Token có `userId`, `employeeId`, `branchId`, `role` và `clientPlatform`.
+- Staff chỉ đăng nhập Mobile, dùng access token Bearer mang platform đã ký; không có phiên cookie Web cho staff. Admin/manager có thể dùng Web/Mobile theo quyền nghiệp vụ.
+- Vai trò kiểm tra tại Gateway và service; quyền đối với bản ghi/chi nhánh/cá nhân do service kiểm tra.
+- `INTERNAL_API_TOKEN` là cấu hình chung cho các cuộc gọi nội bộ qua header `x-internal-token`, timeout tối đa 5000ms. Gateway không chuyển tiếp token nội bộ do client gửi.
+- Tên tiếng Việt trong `x-user-name` được URI-encode khi gửi header và decode ở service nhận; không gửi Unicode thô trong HTTP header.
+- Không dùng slug hoặc tên làm khóa liên kết. API dùng UUID, ngày ISO, kỳ lương `YYYY-MM`, tiền Decimal. Không trả nguyên BigInt/Decimal theo định dạng không tuần tự hóa được.
+
+## Các luồng phải giữ đúng
+
+- Đúng Wi-Fi mới được mở các ca trong ngày trên Mobile; BE kiểm tra lại khi chấm công. Wi-Fi là cấu hình theo chi nhánh nhân viên, không phải thuộc tính từng Shift.
+- Mỗi ca một cặp vào–ra; ca liền kề không phải ca chồng giờ. Chấm công kép ghi ra ca trước/vào ca sau đúng mốc nối trong một transaction.
+- Hết hạn checkout không tự điền giờ ra hoặc cộng lương. Admin/manager có quyền nhập giờ trực tiếp trên ca; duyệt mẫu đơn không làm thao tác đó thay họ.
+- Task riêng giao trực tiếp. Task chung theo chi nhánh/ngày/ca mẫu dùng chung một kết quả hoàn thành.
+- Chỉ công hoàn thành hợp lệ mới có lương. Parttime = salary × giờ gốc; fulltime = salary / standardWorkDays mỗi ca. Phạt phần trăm, ca thiếu công không bị trừ thêm phạt.
+- Phiếu lương cần xác nhận bởi chủ sở hữu/manager đúng phạm vi/admin trước khi chi. Xác nhận chưa trừ số dư.
+- Mẫu đơn chỉ ghi nhận đề nghị/kết quả, không tự sửa lịch, công, lương hay chi tiền.
+- Thông báo/bản tin/quy định lọc theo chi nhánh hoặc toàn thể.
+- Đã loại khỏi phạm vi: archive/restore, các trường slug/updatedAt cũ, phạt tiền cố định và nhiều lượt vào–ra trong cùng ca.
+
+## REST và SOAP chi lương
+
+Gateway chuyển `/api/payroll/*` tới Payroll, `/soap/payroll` tới Integration. WSDL qua GET `/soap/payroll?wsdl`; lệnh chi SOAP là POST XML, trả XML hoặc Fault, không bọc JSON.
+
+Mọi lệnh chi cần `idempotencyKey`, tài khoản nguồn và phiếu lương đã xác nhận. Thành công trừ số dư mô phỏng đúng một lần; lặp cùng lệnh trả kết quả cũ. Thiếu số dư là `INSUFFICIENT_FUNDS` (REST 422 hoặc SOAP Fault). Payout.id là UUID, mã nghiệp vụ bankReference có dạng `GD-...`.
+
+Không sử dụng tài khoản hoặc mật khẩu mẫu ghi trong tài liệu cũ làm thông tin đăng nhập môi trường thật. Seed chỉ được chạy chủ động sau khi schema/migration và dữ liệu khởi tạo được chốt.
+
+## Giới hạn vận hành hiện tại
+
+- Nhắc chấm công được tạo khi client lấy thông báo/gọi nhắc giờ; chưa có scheduler hoặc push nền khi ứng dụng không hoạt động.
+- Nhật ký thao tác nhập giờ ở Work được gửi sang Integration theo best-effort; nếu Integration ngừng hoạt động, lưu công thành công không bị báo thất bại giả.
+- Để kiểm chứng DB sau khi khởi động lại năm Postgres local, chạy `npm run test:database`. Bộ test mặc định và test HTTP xuyên service không cần DB thật.

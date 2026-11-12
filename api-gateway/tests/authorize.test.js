@@ -32,6 +32,19 @@ function run(method, path, role) {
 
 // [method, path, role, mong đợi cho qua]
 const cases = [
+  ["POST", "/api/notifications/reminders", "staff", true],
+  ["GET", "/api/attendance/config", "manager", false],
+  ["GET", "/api/attendance/config", "admin", true],
+  ["PUT", "/api/attendance/s1", "staff", false],
+  ["PUT", "/api/attendance/s1", "manager", true],
+  ["POST", "/api/attendance/double", "staff", true],
+  ["POST", "/api/attendance/preflight", "staff", true],
+  ["POST", "/api/payroll/payslips/p1/confirm", "staff", true],
+  ["POST", "/api/payroll/payslips/p1/confirm", "manager", true],
+  ["GET", "/api/auth/users", "manager", false],
+  ["PUT", "/api/auth/users/u1", "manager", false],
+  ["PUT", "/api/auth/users/u1", "admin", true],
+  ["POST", "/api/positions", "staff", false],
   // Hồ sơ nhân sự: nhân viên chỉ được sửa chính mình / xin thôi việc.
   ["POST", "/api/employees", "staff", false],
   ["POST", "/api/employees", "manager", true],
@@ -64,7 +77,7 @@ const cases = [
   ["PUT", "/api/shift-templates/t1", "admin", true],
 
   ["PUT", "/api/attendance/config", "staff", false],
-  ["PUT", "/api/attendance/config", "manager", true],
+  ["PUT", "/api/attendance/config", "manager", false],
   ["POST", "/api/attendance/checkin", "staff", true],
   ["POST", "/api/attendance/checkout", "staff", true],
 
@@ -123,7 +136,7 @@ const cases = [
   ["POST", "/api/payroll/payslips/generate", "staff", false],
   ["POST", "/api/payroll/payslips/generate", "manager", false],
   ["POST", "/api/payroll/payslips/generate", "admin", true],
-  ["PUT", "/api/payroll/payslips/p1/status", "staff", false],
+  ["PUT", "/api/payroll/payslips/p1/status", "staff", true],
 
   // Nhật ký: mọi vai trò ghi được, xem và xóa đều chỉ admin.
   ["GET", "/api/backlog", "staff", false],
@@ -133,10 +146,10 @@ const cases = [
   ["DELETE", "/api/backlog", "manager", false],
   ["DELETE", "/api/backlog", "admin", true],
 
-  // Cấp lại mật khẩu: theo yêu cầu vẫn mở cho manager (identity-service chặn
-  // manager reset tài khoản admin). sync-employee chỉ gọi nội bộ.
+  // Cấp lại mật khẩu là quản trị hệ thống: chỉ admin (identity-service chặn
+  // mọi truy cập trái quyền). sync-employee chỉ gọi nội bộ.
   ["POST", "/api/auth/reset-password", "staff", false],
-  ["POST", "/api/auth/reset-password", "manager", true],
+  ["POST", "/api/auth/reset-password", "manager", false],
   ["POST", "/api/auth/reset-password", "admin", true],
   ["POST", "/api/auth/sync-employee", "staff", false],
   ["POST", "/api/auth/sync-employee", "admin", false],
@@ -152,18 +165,6 @@ const cases = [
   ["POST", "/api/files/purge-orphans", "manager", false],
   ["POST", "/api/files/purge-orphans", "admin", true],
 
-  // Lưu trữ dữ liệu cũ: mọi thao tác (xem/chạy/khôi phục) chỉ admin.
-  ["POST", "/api/archive/work/run", "staff", false],
-  ["POST", "/api/archive/work/run", "manager", false],
-  ["POST", "/api/archive/integration/run", "manager", false],
-  ["GET", "/api/archive/work/tasks", "manager", false],
-  ["GET", "/api/archive/integration/requests", "staff", false],
-  ["GET", "/api/archive/integration/notifications/n1", "staff", false],
-  ["POST", "/api/archive/work/tasks/t1/restore", "manager", false],
-  ["POST", "/api/archive/work/run", "admin", true],
-  ["GET", "/api/archive/work/tasks", "admin", true],
-  ["GET", "/api/archive/integration/requests/r1", "admin", true],
-  ["POST", "/api/archive/integration/requests/r1/restore", "admin", true],
 ];
 
 for (const [method, path, role, allowed] of cases) {

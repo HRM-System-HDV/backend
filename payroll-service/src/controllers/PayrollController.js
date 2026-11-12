@@ -1,133 +1,18 @@
 "use strict";
-
-const PayrollService = require("../services/PayrollService");
-const { createPayoutUseCase, generatePayslipUseCase } = PayrollService;
-const { validatePayout, validateGenerate } = require("../validators/payrollValidator");
-const { ValidationError, NotFoundError } = require("../utils/errors");
-const { callerFrom, scopePayslipQuery, assertOwnPayslip } = require("../utils/caller");
-
-async function listBankAccounts(_req, res, next) {
-  try {
-    const rows = await PayrollService.listBankAccounts();
-    return res.status(200).json({ data: rows, message: "Thao tác thành công" });
-  } catch (e) {
-    return next(e);
-  }
-}
-
-async function updateBankAccount(req, res, next) {
-  try {
-    const row = await PayrollService.updateBankAccount(req.params.id, req.body);
-    if (!row) throw new NotFoundError("Không tìm thấy tài khoản ngân hàng");
-    return res.status(200).json({ data: row, message: "Thao tác thành công" });
-  } catch (e) {
-    return next(e);
-  }
-}
-
-async function listPayouts(_req, res, next) {
-  try {
-    const rows = await PayrollService.listPayouts();
-    return res.status(200).json({ data: rows, message: "Thao tác thành công" });
-  } catch (e) {
-    return next(e);
-  }
-}
-
-async function createPayout(req, res, next) {
-  try {
-    const errors = validatePayout(req.body);
-    if (errors.length) throw new ValidationError(errors.join("; "));
-    const row = await createPayoutUseCase(req.body);
-    const status = row.deduped ? 200 : 201;
-    return res.status(status).json({ data: row, message: "Thao tác thành công" });
-  } catch (e) {
-    return next(e);
-  }
-}
-
-async function createBankAccount(req, res, next) {
-  try {
-    if (!req.body.accountNumber) throw new ValidationError("Thiếu accountNumber");
-    const row = await PayrollService.createBankAccount(req.body);
-    return res.status(201).json({ data: row, message: "Tạo tài khoản thành công" });
-  } catch (e) {
-    return next(e);
-  }
-}
-
-async function deleteBankAccount(req, res, next) {
-  try {
-    const ok = await PayrollService.deleteBankAccount(req.params.id);
-    if (!ok) throw new NotFoundError("Không tìm thấy tài khoản ngân hàng");
-    return res.status(200).json({ data: { ok: true }, message: "Xóa tài khoản thành công" });
-  } catch (e) {
-    return next(e);
-  }
-}
-
-async function getPayslip(req, res, next) {
-  try {
-    const row = await PayrollService.getPayslip(req.params.id);
-    if (!row) throw new NotFoundError("Không tìm thấy phiếu lương");
-    assertOwnPayslip(row, callerFrom(req));
-    return res.status(200).json({ data: row, message: "Thao tác thành công" });
-  } catch (e) {
-    return next(e);
-  }
-}
-
-async function listPayslips(req, res, next) {
-  try {
-    const rows = await PayrollService.listPayslips(scopePayslipQuery(req.query, callerFrom(req)));
-    return res.status(200).json({ data: rows, message: "Thao tác thành công" });
-  } catch (e) {
-    return next(e);
-  }
-}
-
-async function generatePayslip(req, res, next) {
-  try {
-    const errors = validateGenerate(req.body);
-    if (errors.length) throw new ValidationError(errors.join("; "));
-    const row = await generatePayslipUseCase(req.body);
-    return res.status(201).json({ data: row, message: "Thao tác thành công" });
-  } catch (e) {
-    return next(e);
-  }
-}
-
-async function updatePayslip(req, res, next) {
-  try {
-    const row = await PayrollService.updatePayslip(req.params.id, req.body);
-    if (!row) throw new NotFoundError("Không tìm thấy phiếu lương");
-    return res.status(200).json({ data: row, message: "Thao tác thành công" });
-  } catch (e) {
-    return next(e);
-  }
-}
-
-async function setPayslipStatus(req, res, next) {
-  try {
-    if (!req.body.status) throw new ValidationError("Thiếu trạng thái phiếu");
-    const row = await PayrollService.setPayslipStatus(req.params.id, req.body.status);
-    if (!row) throw new NotFoundError("Không tìm thấy phiếu lương");
-    return res.status(200).json({ data: row, message: "Thao tác thành công" });
-  } catch (e) {
-    return next(e);
-  }
-}
-
+const service = require("../services/PayrollService");
+const { callerFrom } = require("../utils/caller");
+const action = (fn, status = 200) => async (req, res, next) => { try { const data = await fn(req, callerFrom(req)); res.status(data?.deduped ? 200 : status).json({ data, message: "Thao tác thành công" }); } catch (error) { next(error); } };
 module.exports = {
-  listBankAccounts,
-  updateBankAccount,
-  createBankAccount,
-  deleteBankAccount,
-  listPayouts,
-  createPayout,
-  listPayslips,
-  generatePayslip,
-  updatePayslip,
-  setPayslipStatus,
-  getPayslip,
+  listBankAccounts: action((_req, actor) => service.listBankAccounts(actor)),
+  createBankAccount: action((req, actor) => service.createBankAccount(req.body, actor), 201),
+  updateBankAccount: action((req, actor) => service.updateBankAccount(req.params.id, req.body, actor)),
+  deleteBankAccount: action((req, actor) => service.deleteBankAccount(req.params.id, actor)),
+  listPayouts: action((_req, actor) => service.listPayouts(actor)),
+  createPayout: action((req, actor) => service.createPayoutUseCase(req.body, actor), 201),
+  listPayslips: action((req, actor) => service.listPayslips(req.query, actor)),
+  getPayslip: action((req, actor) => service.getPayslip(req.params.id, actor)),
+  generatePayslip: action((req, actor) => service.generatePayslipUseCase(req.body, actor), 201),
+  updatePayslip: action((req, actor) => service.updatePayslip(req.params.id, req.body, actor)),
+  confirmPayslip: action((req, actor) => service.confirmPayslip(req.params.id, actor)),
+  setPayslipStatus: action((req, actor) => service.setPayslipStatus(req.params.id, req.body.status, actor)),
 };

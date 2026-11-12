@@ -37,12 +37,21 @@ function createAuthMiddleware(options = {}) {
           error: { code: "UNAUTHORIZED", message: "Phiên đăng nhập không hợp lệ" },
         });
       }
+      const role = payload.role || payload.systemRole;
+      if (!payload.userId || !["admin", "manager", "staff"].includes(role)) {
+        return res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Danh tính đăng nhập không hợp lệ" } });
+      }
+      if (role === "staff" && (fromCookie || payload.clientPlatform !== "mobile")) {
+        return res.status(403).json({ error: { code: "FORBIDDEN", message: "Nhân viên chỉ được đăng nhập trên ứng dụng Mobile" } });
+      }
       req.user = {
         userId: payload.userId,
+        employeeId: payload.employeeId || null,
         email: payload.email,
         name: payload.name || null,
-        role: payload.role,
-        branchSlug: payload.branchSlug,
+        role,
+        branchId: payload.branchId || null,
+        clientPlatform: payload.clientPlatform || "web",
       };
       return next();
     } catch (e) {

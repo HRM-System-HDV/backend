@@ -17,6 +17,8 @@ router.post("/sync-employee", internalOnly, AuthController.syncEmployee);
 
 // Protected routes (cần phiên đăng nhập)
 router.get("/me", sessionMiddleware, AuthController.me);
+router.get("/users", sessionMiddleware, AuthController.listUsers);
+router.put("/users/:id", sessionMiddleware, AuthController.updateUser);
 router.post("/logout", sessionMiddleware, AuthController.logout);
 router.post("/change-password", sessionMiddleware, AuthController.changePassword);
 router.post("/reset-password", sessionMiddleware, AuthController.resetPassword);

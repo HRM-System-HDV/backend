@@ -2,6 +2,7 @@
 
 const FileService = require("../services/FileService");
 const storage = require("../utils/localStorage");
+const {admin} = require("../utils/access");
 
 function publicIdOf(req) {
   return req.params[0] || "";
@@ -9,15 +10,15 @@ function publicIdOf(req) {
 
 // Đọc ảnh (CCCD, avatar) là dữ liệu nhạy cảm: chỉ chủ file, admin hoặc quản lý
 // cùng chi nhánh được xem. File không có chi nhánh (đã tải lên trước khi có
-// cột branchSlug) chỉ admin và chủ file xem được.
+// chi nhánh) chỉ admin và chủ file xem được.
 function assertCanReadFile(req, asset) {
   const role = req.headers["x-user-role"];
   const userId = req.headers["x-user-id"];
   if (role === "admin") return;
   if (userId && asset.uploadedBy && String(asset.uploadedBy) === String(userId)) return;
   if (role === "manager") {
-    const own = String(req.headers["x-branch-slug"] || "").toLowerCase();
-    const target = String(asset.branchSlug || "").toLowerCase();
+    const own = String(req.headers["x-branch-id"] || "");
+    const target = String(asset.branchId || "");
     if (own && target && own === target) return;
   }
   const err = new Error("Bạn không có quyền xem tệp này");
@@ -29,7 +30,8 @@ function assertCanReadFile(req, asset) {
 async function getFile(req, res, next) {
   try {
     const { asset, bytes } = await FileService.getByPublicId(publicIdOf(req));
-    assertCanReadFile(req, asset);
+    if(asset.regulationId) await require("../services/IntegrationService").contentGet("regulation",asset.regulationId,req.actor);
+    else if(!(asset.folder === "hrm/tasks" && req.actor.branchId && req.actor.branchId === asset.branchId)) assertCanReadFile(req, asset);
     res.setHeader("Content-Type", asset.mime);
     res.setHeader("Content-Length", bytes);
     res.setHeader("Cache-Control", "private, max-age=86400");
@@ -43,6 +45,7 @@ async function getFile(req, res, next) {
 
 async function deleteFile(req, res, next) {
   try {
+    if(!req.actor.internal) admin(req.actor);
     const result = await FileService.deleteByPublicId(publicIdOf(req));
     if (!result.deleted) {
       return res.status(404).json({
@@ -57,6 +60,7 @@ async function deleteFile(req, res, next) {
 
 async function scanOrphans(req, res, next) {
   try {
+    admin(req.actor);
     const result = await FileService.scanOrphans(req.body?.graceHours ?? 24);
     return res.status(200).json({ data: result, message: "Quét ảnh mồ côi thành công" });
   } catch (err) {
@@ -66,6 +70,7 @@ async function scanOrphans(req, res, next) {
 
 async function purgeOrphans(req, res, next) {
   try {
+    admin(req.actor);
     const result = await FileService.purgeOrphans(req.body?.publicIds);
     return res.status(200).json({ data: result, message: "Đã dọn ảnh mồ côi" });
   } catch (err) {

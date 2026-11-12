@@ -1,5 +1,14 @@
 // Prisma schema — work-service
 // DB riêng hrm_work (single-tenant, không có tenantId).
+//
+// Quy tắc định danh (chốt 12/11/2026):
+//  - id: UUID (uuid(7)) cho mọi khóa chính và khóa ngoại.
+//  - employeeId / branchId trỏ sang organization-service: giá trị UUID do
+//    organization cấp, không có FK xuyên DB (docs/RULES.md §6).
+//  - Tham chiếu nội bộ service (shift, template) khai báo quan hệ thật.
+//  - Ngày: DateTime @db.Date — lưu chuỗi "DD/MM/YYYY" làm Postgres so sánh ngày
+//    SAI thứ tự, khiến lọc khoảng ngày (BETWEEN) trả sai tập bản ghi.
+//  - Tiền phạt: Decimal(15,0).
 generator client {
   provider = "prisma-client-js"
 }
@@ -9,135 +18,215 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model Shift {
-  id             String   @id @default(cuid())
-  employeeId     String
-  branchSlug     String?
-  date           String
-  template       String?
-  scheduledStart String?
-  scheduledEnd   String?
-  checkIn        String?
-  checkOut       String?
-  status         String   @default("Chưa chấm công")
-  note           String?
-  isRecurring    Boolean  @default(false)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+// Quy tắc nghiệp vụ; CHECK/index bổ sung nằm trong migration của service:
+// - CHECK tiền phạt, số phút, số lượt >= 0; phần trăm trong [0, 100].
+// - CHECK checkOut chỉ có khi có checkIn và checkOut >= checkIn.
+// - Service kiểm tra chấm công đúng nhân viên/ngày ca; mỗi ca chỉ một lần vào và một lần ra.
+// - Chấm công kép: một thao tác chủ động của nhân viên chốt ca trước và vào ca sau liền kề.
+//   Cùng nhân viên, ca trước đã check-in/chưa checkout, ca sau đã được phân/chưa check-in,
+//   và thời điểm kết thúc ca trước = thời điểm bắt đầu ca sau (kể cả qua ngày).
+//   Trong khoảng [mốc nối - doubleCheckinEarlyMinutes, mốc nối + doubleCheckinLateMinutes],
+//   nếu bật allowDoubleCheckin và còn hạn checkout ca trước: ghi checkOut trước = checkIn sau = mốc nối.
+//   BE kiểm tra Wi-Fi/quyền/giờ hợp lệ, ghi cả hai trong cùng transaction; không phạt tại mốc nối.
+//   Không tự chấm nếu nhân viên không bấm, không ghi đè lượt đã chấm, không hoàn tất ca sau.
+// - Chỉ tính lương khi có đủ check-in và checkout hợp lệ; thiếu checkout thì không có lương ca.
+// - Hết hạn checkout: từ chối checkout ca cũ, giữ checkOut = null, không có lương ca đó.
+// - FE đưa nút về "Chấm công" để dùng cho ca khác; BE không để ca cũ thiếu checkout
+//   chặn check-in ca mới, nhưng vẫn kiểm tra ca mới hợp lệ và không cho vào lại ca cũ.
+// - Trạng thái nút do FE/BE tính từ ca và hạn checkout; không lưu thành cột DB.
+// - Hạn checkout = thời điểm kết thúc ca (workDate + scheduledEnd) + checkoutWindowMinutes.
+//   scheduledEnd được chụp từ ca mẫu khi phân ca; ca qua đêm dùng ngày kết thúc hôm sau.
+//   Từ thời điểm hết hạn trở đi, ca cũ không còn được checkout.
+// - Đơn bổ sung chỉ gửi/duyệt nội dung; duyệt đơn không sửa chấm công hoặc cộng lương.
+//   Admin/quản lý có thể vào ca hiện có và tự chọn giờ vào/ra; lưu đủ giờ hợp lệ mới tính lương.
+// - Quên chấm công (vd bắt đầu 17:00, sang 17:01 chưa vào) không khóa check-in muộn.
+//   Ghi nhận đi muộn và phạt theo cấu hình; chỉ cho đổi ca trước giờ bắt đầu, chưa check-in.
+// - Chưa lưu cột lương tích lũy riêng: tổng hợp chấm công hợp lệ khi đọc và chốt phiếu lương.
+// - Giờ HH:mm phải hợp lệ; scheduledEnd <= scheduledStart nghĩa là kết thúc hôm sau.
+// - Service chụp giờ từ template vào scheduledStart/scheduledEnd khi tạo ca,
+//   để sửa template không làm thay đổi lịch đã phân.
+// - Wi-Fi kiểm tra trước khi mở danh sách ca trong ngày trên Mobile, không theo thuộc tính ca.
+//   Shift không lưu branchId; phạm vi nhân sự lấy từ Organization.
+// - Chống trùng áp dụng cả phân ca, chọn người làm thay và đổi ca: nhân viên đích đã có
+//   cùng workDate/templateId thì từ chối, không tạo đơn đổi/làm thay hoặc phân thêm ca đó.
+//   BE còn kiểm tra ca khác mẫu nhưng chồng giờ; unique không kiểm tra được khoảng giờ.
+// CHECK/index tương ứng đã khai báo trong migration 20261112230000_hrm_uuid_redesign.
 
+// Khung ca mẫu — danh mục, có mã nghiệp vụ ST-SANG.
+model ShiftTemplate {
+  id           String   @id @default(uuid(7)) @db.Uuid
+  templateCode String   @unique
+  name         String
+  // Giờ trong ngày ("HH:mm") — KHÔNG phải mốc thời gian, nên giữ dạng chuỗi.
+  startTime    String
+  endTime      String
+  createdAt    DateTime @default(now())
+
+  shifts        Shift[]
+  registrations ShiftRegistration[]
+  tasks         Task[]
+
+  @@index([name])
+  @@map("shift_templates")
+}
+
+model Shift {
+  id             String   @id @default(uuid(7)) @db.Uuid
+  // employees.id của organization-service.
+  employeeId     String   @db.Uuid
+  workDate       DateTime @db.Date
+  // Khung ca áp dụng: shift_templates.id (trước đây lưu TÊN khung ca).
+  templateId     String   @db.Uuid
+  // Giờ dự kiến trong ngày ("HH:mm") — là GIỜ TRONG NGÀY, không phải mốc thời gian,
+  // nên giữ dạng chuỗi cho gọn; còn giờ vào/ra THỰC TẾ nằm ở attendances (DateTime).
+  scheduledStart String
+  scheduledEnd   String
+  note           String?
+  // Vòng đời CỦA CHÍNH cái ca — hai trạng thái này KHÔNG suy ra được từ
+  // attendances, nên phải lưu ở đây: "đang làm" | "đã hủy".
+  // Cấm dùng cột này cho kết quả chấm công (present/late/missed) — kết quả
+  // thuộc về attendances, lưu 2 nơi là 2 nguồn sự thật.
+  status         String   @default("đang làm")
+  createdAt      DateTime @default(now())
+
+  // KHÔNG có checkIn/checkOut ở đây: giờ vào/ra nằm ở attendances
+  // (mỗi ca tối đa một cặp vào–ra) — không lưu trùng trên ca.
+  template   ShiftTemplate @relation(fields: [templateId], references: [id], onDelete: Restrict)
+  attendance Attendance?
+
+  @@unique([employeeId, workDate, templateId])
+  @@index([employeeId])
+  @@index([templateId])
+  @@index([workDate])
   @@map("shifts")
 }
 
 model Attendance {
-  id            String   @id @default(cuid())
-  employeeId    String
-  shiftId       String?
-  date          String
-  checkIn       String?
-  checkOut      String?
-  penaltyAmount Float    @default(0)
+  id            String    @id @default(uuid(7)) @db.Uuid
+  employeeId    String    @db.Uuid
+  shiftId       String    @unique @db.Uuid
+  workDate      DateTime  @db.Date
+  // Một dòng = chấm công của một ca, chỉ một lần check-in và một lần checkout.
+  // Service phải kiểm tra employeeId trùng nhân viên của ca.
+  // Mốc thời gian thực tế chấm công vào/ra (timestamptz).
+  // Lưu DateTime thay vì chuỗi "HH:mm" để payroll cộng giờ cho nhân viên
+  // lương theo giờ bằng phép trừ mốc thời gian được chính xác.
+  checkIn       DateTime? @db.Timestamptz
+  checkOut      DateTime? @db.Timestamptz
+  // Số tiền quy đổi từ phần trăm, tổng hợp khi tính lương; không trừ lúc checkout.
+  // hourly: tỷ lệ x (salary x tổng giờ thực tế của ca).
+  // monthly: tỷ lệ x (salary / standardWorkDays thỏa thuận trong Employee).
+  // Tỷ lệ % được chia 100; mỗi vi phạm chỉ tính phạt một lần.
+  penaltyAmount Decimal   @default(0) @db.Decimal(15, 0)
   penaltyNote   String?
-  status        String   @default("present")
-  createdAt     DateTime @default(now())
+  // Kết quả của lượt chấm công: present | late | missed | ...
+  // KHÔNG có default "present": default đó tự khẳng định "đi làm đầy đủ" cho mọi
+  // dòng chưa kịp tính ⇒ nhân viên đi muộn vẫn được ghi nhận có công. BE phải tính
+  // và ghi rõ giá trị ngay lúc tạo dòng chấm công.
+  status        String
+  createdAt     DateTime  @default(now())
 
+  shift Shift @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+
+  @@index([employeeId])
+  @@index([workDate])
   @@map("attendances")
 }
 
-model AttendanceConfig {
-  id                      String @id @default("default")
-  latePenaltyAmount       Int    @default(20000)
-  earlyLeavePenaltyAmount Int    @default(0)
-  gracePeriodMinutes      Int    @default(5)
-  checkoutWindowMinutes   Int    @default(60)
-  autoCloseShift          Boolean @default(false)
-  shiftSwapMode           String @default("manual")
-  latePenaltyPct          Int    @default(10)
-  earlyLeavePenaltyPct    Int    @default(10)
-  earlyCheckinMinutes     Int    @default(15)
-  maxPenaltiesPerMonth    Int    @default(10)
-  deductOnCheckout        Boolean @default(true)
-  allowDoubleCheckin      Boolean @default(true)
-  maxCheckinsPerDay       Int    @default(3)
-  maxSwapsPerMonth        Int    @default(3)
-  requireReasonSwap       Boolean @default(true)
-
-  @@map("attendance_configs")
-}
-
-model ShiftTemplate {
-  id        String   @id @default(cuid())
-  name      String
-  startTime String
-  endTime   String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@map("shift_templates")
-}
-
+// Đăng ký ca: nhân viên chọn khung ca muốn làm vào một NGÀY cụ thể.
+// CHỈ lưu ngày — KHÔNG lưu khoá tuần ("W42-2026"): tuần suy ra được từ ngày
+// (ISO week, thứ 2 là ngày đầu tuần), lưu cả hai là trùng lặp (R6).
+// Vì vậy API "xem theo tuần" phải dịch ?week=W42-2026 thành KHOẢNG NGÀY
+// [thứ 2 .. chủ nhật] rồi lọc registerDate BETWEEN — xem docs/AUDIT.md mục 6.4.
 model ShiftRegistration {
-  id         String   @id @default(cuid())
-  employeeId String
-  branchSlug String?
-  week       String?
-  shiftId    String?
-  createdAt  DateTime @default(now())
+  id           String   @id @default(uuid(7)) @db.Uuid
+  employeeId   String   @db.Uuid
+  branchId     String?  @db.Uuid
+  registerDate DateTime @db.Date
+  // Khung ca được đăng ký: shift_templates.id (trước đây cột tên là `shiftId`
+  // nhưng lưu id template — gây hiểu nhầm, xem mục 13.3 của báo cáo audit).
+  templateId   String   @db.Uuid
+  createdAt    DateTime @default(now())
 
+  template ShiftTemplate @relation(fields: [templateId], references: [id], onDelete: Restrict)
+
+  @@unique([employeeId, registerDate, templateId])
+  @@index([employeeId])
+  @@index([templateId])
+  @@index([registerDate])
   @@map("shift_registrations")
 }
 
 model Task {
-  id               String   @id @default(cuid())
+  id               String    @id @default(uuid(7)) @db.Uuid
   title            String
   description      String?
-  assignedTo       String?
-  branchSlug       String?
-  dueDate          String?
-  status           String   @default("pending")
-  sourceType       String?  @default("manager")
+  // Task riêng gán thẳng employees.id; không có bước nhận/chấp nhận việc.
+  // Mỗi người được giao có một bản ghi/kết quả riêng.
+  // Task chung: để null, mọi nhân viên được phân cùng chi nhánh/ngày/ca mẫu đều thấy.
+  assignedTo       String?   @db.Uuid
+  // branches.id của organization-service.
+  branchId         String?   @db.Uuid
+  dueDate          DateTime? @db.Date
+  status           String    @default("pending")
+  // Task chung bắt buộc branchId + workDate + templateId, không gắn một Shift cá nhân.
+  // Một người hoàn thành thì cập nhật chính task này; cả ca thấy chung trạng thái/ảnh.
+  workDate         DateTime? @db.Date
+  templateId       String?   @db.Uuid
+  assignedBy       String?   @db.Uuid // users.id của identity-service
+  // Các trường dưới đây là ảnh chụp để hiển thị, KHÔNG dùng để khoá quyền.
   assignedByName   String?
   shiftName        String?
-  priority         String?  @default("normal")
-  assignedToEmail  String?
+  priority         String?   @default("normal")
   assignedToName   String?
-  completedAt      String?
-  requirePhoto     Boolean? @default(false)
+  completedAt      DateTime?
+  requirePhoto     Boolean   @default(false)
   proofPhotoUrl    String?
-  photoSubmittedBy String?
-  photoSubmittedAt String?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  // users.id của identity-service (người nộp ảnh minh chứng).
+  photoSubmittedBy String?   @db.Uuid
+  photoSubmittedAt DateTime?
+  createdAt        DateTime  @default(now())
 
+  template ShiftTemplate? @relation(fields: [templateId], references: [id], onDelete: Restrict)
+
+  @@index([branchId, workDate, templateId])
+  @@index([templateId])
+  @@index([assignedTo])
+  @@index([branchId])
+  @@index([status])
   @@map("tasks")
 }
 
-// Kho lưu trữ nhiệm vụ cũ — mirror trường Task, giữ id gốc để khôi phục.
-// Ảnh minh chứng của nhiệm vụ archive không bị xóa.
-model ArchivedTask {
-  id               String   @id // id gốc của Task
-  title            String
-  description      String?
-  assignedTo       String?
-  branchSlug       String?
-  dueDate          String?
-  status           String
-  sourceType       String?
-  assignedByName   String?
-  shiftName        String?
-  priority         String?
-  assignedToEmail  String?
-  assignedToName   String?
-  completedAt      String?
-  requirePhoto     Boolean?
-  proofPhotoUrl    String?
-  photoSubmittedBy String?
-  photoSubmittedAt String?
-  createdAt        DateTime
-  updatedAt        DateTime
-  archivedAt       DateTime @default(now())
-  archiveBatchId   String
+// Tối đa một dòng: migration có CHECK isSingleton = true kết hợp UNIQUE.
+// Service tạo cấu hình khi quản trị viên lưu; không tự sinh dữ liệu nghiệp vụ.
+model AttendanceConfig {
+  id                        String        @id @default(uuid(7)) @db.Uuid
+  isSingleton               Boolean       @unique @default(true)
+  // Mặc định không ân hạn: check-in muộn được phép nhưng áp dụng phạt phần trăm.
+  gracePeriodMinutes        Int           @default(0)
+  // Số phút tính từ giờ kết thúc ca được áp dụng từ ca mẫu.
+  // Ví dụ ca kết thúc 17:00, cấu hình 60 phút: từ 18:00 không cho checkout ca đó.
+  // Hết hạn thì bỏ ca cũ khỏi lượt checkout đang chờ, cho phép chấm công ca khác hợp lệ.
+  // Không tự điền checkOut và không xóa dữ liệu checkIn của ca cũ.
+  checkoutWindowMinutes     Int           @default(60)
+  // Không giới hạn số lần đổi ca; chế độ được chụp vào đơn khi tạo.
+  shiftSwapMode             ShiftSwapMode @default(manager_approval)
+  // Chỉ phạt theo phần trăm, cơ sở tiền được mô tả tại Attendance.penaltyAmount.
+  latePenaltyPct            Int           @default(10)
+  earlyLeavePenaltyPct      Int           @default(10)
+  earlyCheckinMinutes       Int           @default(15)
+  // Chấm công kép cho hai ca LIỀN NHAU, không phải nhiều lần vào–ra trong một ca.
+  allowDoubleCheckin        Boolean       @default(false)
+  // Khoảng sớm/trễ tính từ mốc kết thúc ca trước = bắt đầu ca sau.
+  // Khi đủ điều kiện, BE ghi cả hai mốc đúng giờ ca, không lấy giờ bấm nút.
+  doubleCheckinEarlyMinutes Int           @default(0)
+  doubleCheckinLateMinutes  Int           @default(0)
+  requireReasonSwap         Boolean       @default(true)
 
-  @@index([archivedAt])
-  @@index([createdAt])
-  @@map("archived_tasks")
+  @@map("attendance_configs")
+}
+
+enum ShiftSwapMode {
+  manager_approval
+  mutual_acceptance
 }

@@ -1,9 +1,7 @@
 "use strict";
 
 // Logic SOAP thuần túy (không phụ thuộc Express) để dễ kiểm thử unit.
-// Khuôn SSOT tại A_Work_Flow.md §6:
-// Request: PayoutRequest(idempotencyKey, debitAccount, content, totalAmount, beneficiaryCount)
-// Response: PayoutResponse(transactionId TXN-*, bankReference BANK-*, status)
+// PayoutRequest tham chiếu các payslipId đã xác nhận; Payroll kiểm tra tổng và chống chi trùng.
 // Lỗi: soap:Fault với faultcode = soap:Client.
 
 function escapeXml(value) {
@@ -32,6 +30,7 @@ function extractTag(xml, tag) {
 
 function parsePayoutRequest(xml) {
   const body = String(xml || "");
+  if(/<!DOCTYPE|<!ENTITY/i.test(body)) return {error:"SOAP không được chứa DTD hoặc thực thể ngoài"};
   if (!/<\s*(?:\w+:)?Body[\s>]/i.test(body) || !/<\s*(?:\w+:)?PayoutRequest[\s>]/i.test(body)) {
     return { error: "Nội dung SOAP không hợp lệ, thiếu PayoutRequest" };
   }
@@ -40,10 +39,12 @@ function parsePayoutRequest(xml) {
   const content = extractTag(body, "content");
   const totalAmountRaw = extractTag(body, "totalAmount");
   const beneficiaryCountRaw = extractTag(body, "beneficiaryCount");
+  const payslipIds = [...body.matchAll(/<\s*(?:\w+:)?payslipId\s*>([^<]+)<\s*\/\s*(?:\w+:)?payslipId\s*>/gi)].map(m=>unescapeXml(m[1].trim()));
   const missing = [];
   if (!idempotencyKey) missing.push("idempotencyKey");
   if (!debitAccount) missing.push("debitAccount");
   if (!totalAmountRaw) missing.push("totalAmount");
+  if (!payslipIds.length || payslipIds.some(id=>!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) return {error:"Cần danh sách payslipId UUID đã xác nhận"};
   if (missing.length) return { error: `Thiếu trường bắt buộc: ${missing.join(", ")}` };
   const totalAmount = Number(totalAmountRaw);
   if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
@@ -52,10 +53,11 @@ function parsePayoutRequest(xml) {
   return {
     data: {
       idempotencyKey,
+      payslipIds,
       debitAccount,
       content,
-      totalAmount,
-      beneficiaryCount: beneficiaryCountRaw ? Number(beneficiaryCountRaw) || 0 : 0,
+      totalAmount: totalAmountRaw,
+      ...(beneficiaryCountRaw ? {beneficiaryCount:Number(beneficiaryCountRaw)} : {}),
     },
   };
 }
@@ -94,6 +96,7 @@ function buildWsdl(serviceUrl) {
     `<xsd:element name="content" type="xsd:string"/>` +
     `<xsd:element name="totalAmount" type="xsd:decimal"/>` +
     `<xsd:element name="beneficiaryCount" type="xsd:int"/>` +
+    `<xsd:element name="payslipId" type="xsd:string" minOccurs="1" maxOccurs="unbounded"/>` +
     `</xsd:sequence></xsd:complexType></xsd:element>` +
     `<xsd:element name="PayoutResponse"><xsd:complexType><xsd:sequence>` +
     `<xsd:element name="transactionId" type="xsd:string"/>` +

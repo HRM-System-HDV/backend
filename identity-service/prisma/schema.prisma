@@ -1,5 +1,15 @@
 // Prisma schema — identity-service
-// DB dùng chung Supabase Postgres (single-tenant, không có tenantId).
+// DB riêng hrm_identity (single-tenant, không có tenantId).
+//
+// Quy tắc định danh (chốt 12/11/2026):
+//  - id: UUID (uuid(7)) cho mọi khóa chính và khóa ngoại.
+//  - Không có slug ở bất kỳ bảng nào.
+//  - users.id thuộc identity; liên kết sang hồ sơ nhân sự (organization) qua
+//    users.employeeId — giá trị UUID do organization cấp, không có FK xuyên DB.
+//
+// identity chỉ lo XÁC THỰC + PHÂN QUYỀN HỆ THỐNG. Mọi thông tin nghiệp vụ
+// (họ tên, chức danh, phòng ban, chi nhánh dùng để hiển thị) thuộc về
+// organization-service — vì vậy bảng này KHÔNG có cột chức danh hiển thị.
 generator client {
   provider = "prisma-client-js"
 }
@@ -9,48 +19,71 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// BE trim và chuẩn hóa chữ thường cho email trước khi ghi.
+// Khi gắn refresh token với deviceSession, service kiểm tra cùng userId.
 model User {
-  id           String   @id @default(cuid())
-  email        String   @unique
+  id           String     @id @default(uuid(7)) @db.Uuid
+  // employees.id của organization-service. NULL = tài khoản chưa gắn hồ sơ.
+  // Liên kết lần đầu bằng email (đã UNIQUE) nên 2 service khởi động độc lập,
+  // không phụ thuộc thứ tự boot.
+  employeeId   String?    @unique @db.Uuid
+  email        String     @unique
   passwordHash String
   name         String
-  role         String   @default("staff") // admin | manager | staff
-  roleTitle    String   @default("Nhân viên")
-  branchSlug   String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  // Vai trò hệ thống: admin | manager | staff — ký vào token.
+  systemRole   SystemRole @default(staff)
+  // Bản sao phạm vi chi nhánh từ organization; cập nhật khi nhân viên chuyển chi nhánh.
+  branchId     String?    @db.Uuid
+  createdAt    DateTime   @default(now())
 
+  deviceSessions DeviceSession[]
+  refreshTokens  RefreshToken[]
+
+  @@index([branchId])
   @@map("users")
 }
 
 model DeviceSession {
-  id         String   @id @default(cuid())
-  userId     String
+  id         String   @id @default(uuid(7)) @db.Uuid
+  userId     String   @db.Uuid
   deviceName String
-  deviceType String   @default("desktop") // phone | tablet | desktop
+  // Không có default "desktop"/"Hà Nội, Việt Nam"/"Đang hoạt động": ba giá trị đó là
+  // BỊA số liệu — đăng nhập từ điện thoại mà DB ghi "desktop" thì màn Thiết bị nói dối.
+  // Client biết gì gửi nấy, không biết thì để trống (màn hình hiện "Không rõ").
+  deviceType String? // phone | tablet | desktop
   osInfo     String?
-  location   String?  @default("Hà Nội, Việt Nam")
+  location   String?
   ipAddress  String?
-  lastActive String   @default("Đang hoạt động")
-  isCurrent  Boolean  @default(true)
+  // isCurrent được tính từ session của request, không lưu trong DB.
+  lastSeenAt DateTime @default(now()) @db.Timestamptz
   createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshTokens RefreshToken[]
 
   @@index([userId])
   @@map("device_sessions")
 }
 
 model RefreshToken {
-  id              String   @id @default(cuid())
+  id              String   @id @default(uuid(7)) @db.Uuid
   token           String   @unique
-  userId          String
-  deviceSessionId String?
-  expiresAt       DateTime?
+  userId          String   @db.Uuid
+  deviceSessionId String?  @db.Uuid
+  expiresAt       DateTime @db.Timestamptz
   revoked         Boolean  @default(false)
   createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceSession DeviceSession? @relation(fields: [deviceSessionId], references: [id], onDelete: SetNull)
 
   @@index([userId])
   @@index([deviceSessionId])
   @@map("refresh_tokens")
+}
+
+enum SystemRole {
+  admin
+  manager
+  staff
 }

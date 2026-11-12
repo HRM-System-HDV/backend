@@ -1,5 +1,13 @@
 // Prisma schema — payroll-service
 // DB riêng hrm_payroll (single-tenant, không có tenantId).
+//
+// Quy tắc định danh (chốt 12/11/2026):
+//  - id: UUID (uuid(7)) cho mọi khóa chính và khóa ngoại.
+//  - employeeId / branchId trỏ sang organization-service: giá trị UUID do
+//    organization cấp, không có FK xuyên DB (docs/RULES.md §6).
+//  - Tiền: Decimal(15,0) — VNĐ không có xu lẻ, Float sẽ làm sai số khi cộng dồn.
+//  - payslips.month là KỲ lương định dạng YYYY-MM (chuỗi sắp xếp đúng thứ tự thời gian),
+//    vẫn là chuỗi, không phải ngày.
 generator client {
   provider = "prisma-client-js"
 }
@@ -9,49 +17,112 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// Quy tắc nghiệp vụ; CHECK/index bổ sung nằm trong migration của service:
+// - CHECK salaryRate/baseSalary/bonus/totalPenalty/workedHours >= 0, totalAmount > 0.
+// - CHECK hourly bắt buộc workedHours; month đúng YYYY-MM.
+// - salaryRate là bản chụp Employee.salary, không phải mức lương cấu hình thứ hai.
+// - hourly: baseSalary = salaryRate x workedHours (giờ thực tế dạng thập phân).
+// - monthly: lương một ca = Employee.salary / Employee.standardWorkDays; 1 ca = 1 công.
+// - baseSalary là tổng lương tích lũy từ các ca có đủ check-in và checkout hợp lệ.
+//   Với monthly, mỗi shiftId hoàn thành chỉ được cộng một công.
+//   Nghỉ/vắng hoặc thiếu checkout không có lương ca; duyệt đơn bổ sung không sửa chấm công.
+// - netSalary = baseSalary + bonus - totalPenalty; không tự chặn về 0.
+// - Phiếu đã xác nhận giữ bản chụp; BE chỉ chi phiếu đã xác nhận và chưa thanh toán.
+// - Nhân viên sở hữu, manager đúng phạm vi hoặc admin được xác nhận; lấy danh tính từ phiên.
+// - Một phiếu trả đủ trong một lệnh chi; tạm ứng chỉ gửi/duyệt đơn, không tự trừ lương.
+// - Tổng tiền và số người nhận của Payout phải khớp các Payslip được gắn.
+// CHECK/index tương ứng đã khai báo trong migration 20261112230000_hrm_uuid_redesign.
+
 model BankAccount {
-  id            String   @id @default(cuid())
+  id            String   @id @default(uuid(7)) @db.Uuid
   accountNumber String   @unique
   accountName   String?
   bankName      String?
-  branch        String?
-  balance       Float    @default(0)
-  status        String   @default("hoạt động")
+  // branches.id của organization-service (trước đây lưu TÊN chi nhánh).
+  branchId      String?  @db.Uuid
+  balance       Decimal  @default(0) @db.Decimal(15, 0)
+  // Dự kiến tối đa một tài khoản chính toàn hệ thống.
+  // Migration có partial unique index WHERE isPrimary = true.
   isPrimary     Boolean  @default(false)
   createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
 
+  debitPayouts Payout[]
+
+  @@index([branchId])
   @@map("bank_accounts")
 }
 
 model Payout {
-  id               String   @id
-  bankReference    String   @unique
-  debitAccount     String
-  totalAmount      Float
-  content          String?
-  beneficiaryCount Int      @default(0)
-  idempotencyKey   String   @unique
-  status           String   @default("pending")
-  createdAt        DateTime @default(now())
+  id                 String   @id @default(uuid(7)) @db.Uuid
+  // Mã lệnh chi GD-000001 — sinh bằng sequence của Postgres (xem migration).
+  // Dùng hàm pad_code() vì lpad() CẮT chuỗi khi số vượt độ dài (1000000 -> "100000").
+  bankReference      String   @unique @default(dbgenerated("'GD-' || pad_code(nextval('payout_ref_seq'), 6)"))
+  // Tài khoản trích nợ: bank_accounts.id + số tài khoản để hiển thị/in.
+  debitAccountId     String?  @db.Uuid
+  debitAccountNumber String?
+  totalAmount        Decimal  @db.Decimal(15, 0)
+  content            String?
+  beneficiaryCount   Int      @default(0)
+  idempotencyKey     String   @unique
+  status             String   @default("pending")
+  createdAt          DateTime @default(now())
 
+  debitAccount BankAccount? @relation(fields: [debitAccountId], references: [id], onDelete: SetNull)
+  payslips     Payslip[]
+
+  @@index([debitAccountId])
   @@map("payouts")
 }
 
 model Payslip {
-  id          String   @id @default(cuid())
-  employeeId  String
-  month       String
-  baseSalary  Float    @default(0)
-  bonus       Float    @default(0)
-  totalPenalty Float   @default(0)
-  netSalary   Float    @default(0)
-  payoutId    String?
-  status      String   @default("chưa chốt")
-  // Chi nhánh của nhân viên: dùng để ghim phạm vi đọc cho quản lý.
-  branchSlug  String?
-  issuedAt    DateTime @default(now())
+  id           String        @id @default(uuid(7)) @db.Uuid
+  // employees.id của organization-service.
+  employeeId   String        @db.Uuid
+  // Kỳ lương định dạng YYYY-MM (ví dụ "2026-11") — chuỗi sắp xếp ĐÚNG thứ tự
+  // thời gian (MM-YYYY thì "12-2026" < "11-2026" ⇒ sai).
+  // BE validate bằng /^\d{4}-(0[1-9]|1[0-2])$/.
+  month        String
+  // Ảnh chụp số liệu tại thời điểm phát hành — không join lại hồ sơ nhân sự
+  // (đổi lương sau không được sửa phiếu lương cũ).
+  // KHÔNG có default 0: thiếu cột nào cũng phải NÉM LỖI chứ không được âm thầm
+  // xuất phiếu 0đ — phiếu lương 0đ trông hợp lệ nên không ai phát hiện.
+  // Tổng lương tích lũy hợp lệ trong kỳ trước thưởng/phạt, không phải nguyên lương thỏa thuận.
+  baseSalary   Decimal       @db.Decimal(15, 0)
+  bonus        Decimal       @db.Decimal(15, 0)
+  totalPenalty Decimal       @db.Decimal(15, 0)
+  netSalary    Decimal       @db.Decimal(15, 0)
+  // Cơ sở tính lương được chụp tại thời điểm lập phiếu.
+  salaryType   SalaryType
+  salaryRate   Decimal       @db.Decimal(15, 0)
+  // Tổng giờ thực tế trong kỳ: 5.0 là 5 giờ, 5.5 là 5 giờ 30 phút.
+  // Bắt buộc cho hourly; monthly để null. Đây là số giờ hiển thị đã làm tròn.
+  // BE tính tiền từ thời lượng gốc checkOut - checkIn, không lấy số giờ làm tròn này nhân lương.
+  workedHours  Decimal?      @db.Decimal(10, 2)
+  // payouts.id — lệnh chi đã trả cho phiếu lương này.
+  payoutId     String?       @db.Uuid
+  // chưa xác nhận | đã xác nhận | đã thanh toán; BE kiểm tra chuyển trạng thái.
+  status       PayslipStatus @default(pending_confirmation)
+  confirmedBy  String?       @db.Uuid // users.id của identity-service
+  confirmedAt  DateTime?     @db.Timestamptz
+  // branches.id của nhân viên: dùng ghim phạm vi đọc cho quản lý.
+  branchId     String?       @db.Uuid
+  issuedAt     DateTime      @default(now())
+
+  payout Payout? @relation(fields: [payoutId], references: [id], onDelete: Restrict)
 
   @@unique([employeeId, month])
+  @@index([branchId])
+  @@index([payoutId])
   @@map("payslips")
+}
+
+enum SalaryType {
+  monthly
+  hourly
+}
+
+enum PayslipStatus {
+  pending_confirmation @map("chưa xác nhận")
+  confirmed            @map("đã xác nhận")
+  paid                 @map("đã thanh toán")
 }

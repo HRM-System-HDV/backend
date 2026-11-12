@@ -1,7 +1,7 @@
 "use strict";
 
 const { verifyToken } = require("../utils/jwt");
-const { UnauthorizedError } = require("../utils/errors");
+const { UnauthorizedError, ForbiddenError } = require("../utils/errors");
 
 const COOKIE_NAME = "hrm-session";
 
@@ -12,7 +12,7 @@ function extractToken(req) {
   return null;
 }
 
-// Bắt buộc cho GET /api/auth/me. Các service khác (B/D/E) tự verify JWT bằng JWT_SECRET dùng chung.
+// Các tuyến cá nhân của Identity tự verify token; service nghiệp vụ nhận danh tính tin cậy từ Gateway.
 function sessionMiddleware(req, _res, next) {
   try {
     const token = extractToken(req);
@@ -22,11 +22,18 @@ function sessionMiddleware(req, _res, next) {
     if (decoded.type === "refresh") {
       throw new UnauthorizedError("Token cung cấp không phải là access token");
     }
+    if (decoded.role === "staff" && (decoded.clientPlatform !== "mobile" || req.cookies?.[COOKIE_NAME])) {
+      throw new ForbiddenError("Nhân viên chỉ được truy cập từ Mobile");
+    }
     req.user = {
       userId: decoded.userId,
       email: decoded.email,
       role: decoded.role,
-      branchSlug: decoded.branchSlug || null,
+      employeeId: decoded.employeeId || null,
+      branchId: decoded.branchId || null,
+      systemRole: decoded.systemRole || decoded.role,
+      clientPlatform: decoded.clientPlatform,
+      deviceSessionId: decoded.deviceSessionId,
     };
     return next();
   } catch (e) {

@@ -1,47 +1,19 @@
 "use strict";
-
+const config = require("../config");
 const { ForbiddenError } = require("./errors");
-
-// Danh tính do gateway chuyển xuống sau khi verify JWT và xóa header giả mạo.
-function callerFrom(req) {
-  return {
-    userId: req.headers["x-user-id"] || null,
-    role: req.headers["x-user-role"] || "staff",
-    branchSlug: req.headers["x-branch-slug"] || null,
-  };
+function callerFrom(req) { return { userId: req.headers["x-user-id"] || null, employeeId: req.headers["x-employee-id"] || null, branchId: req.headers["x-branch-id"] || null, role: req.headers["x-user-role"] || null, internal: !!config.internalToken && req.headers["x-internal-token"] === config.internalToken }; }
+function requireAdmin(actor) { if (!actor || (actor.role !== "admin" && !actor.internal)) throw new ForbiddenError("Chỉ quản trị viên được thực hiện thao tác này"); }
+function scopePayslipQuery(query, actor) {
+  if (!actor || (!actor.userId && !actor.internal)) throw new ForbiddenError("Thiếu danh tính");
+  if (actor.role === "admin" || actor.internal) return { ...query };
+  if (actor.role === "manager" && actor.branchId) return { ...query, branchId: actor.branchId };
+  if (actor.role === "staff" && actor.employeeId) return { ...query, employeeId: actor.employeeId, branchId: undefined };
+  throw new ForbiddenError("Không đủ phạm vi nhân sự");
 }
-
-function isPrivileged(caller) {
-  return caller.role === "admin" || caller.role === "manager";
+function assertOwnPayslip(row, actor) {
+  if (actor?.role === "admin" || actor?.internal) return;
+  if (actor?.role === "manager" && actor.branchId && actor.branchId === row.branchId) return;
+  if (actor?.role === "staff" && actor.employeeId && actor.employeeId === row.employeeId) return;
+  throw new ForbiddenError("Không được truy cập phiếu lương ngoài phạm vi");
 }
-
-// Nhân viên chỉ được đọc phiếu lương của chính mình, bất kể query gửi lên gì.
-// Quản lý chỉ được đọc phiếu lương của chi nhánh mình quản lý (ghim chi nhánh
-// theo header do gateway ký), không đọc được toàn công ty.
-function scopePayslipQuery(query, caller) {
-  if (caller.role === "admin") return { ...query };
-  if (caller.role === "manager") {
-    if (!caller.branchSlug) {
-      throw new ForbiddenError("Tài khoản quản lý chưa được gán chi nhánh");
-    }
-    return { ...query, branchSlug: caller.branchSlug };
-  }
-  if (!caller.userId) throw new ForbiddenError("Không xác định được nhân viên đang đăng nhập");
-  return { ...query, employeeId: caller.userId };
-}
-
-function assertOwnPayslip(row, caller) {
-  if (!row) return;
-  if (caller.role === "admin") return;
-  if (caller.role === "manager") {
-    const own = String(caller.branchSlug || "").toLowerCase();
-    const target = String(row.branchSlug || "").toLowerCase();
-    if (own && target && own === target) return;
-    throw new ForbiddenError("Bạn không có quyền xem phiếu lương ngoài chi nhánh của mình");
-  }
-  if (String(row.employeeId) !== String(caller.userId)) {
-    throw new ForbiddenError("Bạn không có quyền xem phiếu lương của người khác");
-  }
-}
-
-module.exports = { callerFrom, isPrivileged, scopePayslipQuery, assertOwnPayslip };
+module.exports = { callerFrom, requireAdmin, scopePayslipQuery, assertOwnPayslip };
