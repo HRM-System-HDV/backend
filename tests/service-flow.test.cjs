@@ -94,8 +94,8 @@ after(async () => {
 });
 
 test("HTTP liên service: hồ sơ, ca, công việc, tích lũy, xác nhận và chi tiền", { timeout: 90000 }, async () => {
-  const branch = await call("POST", "/api/branches", { name: "Chi nhánh A" }, admin, 201);
-  const otherBranch = await call("POST", "/api/branches", { name: "Chi nhánh B" }, admin, 201);
+  const branch = await call("POST", "/api/branches", { name: "Chi nhánh A", address: "Hà Nội" }, admin, 201);
+  const otherBranch = await call("POST", "/api/branches", { name: "Chi nhánh B", address: "Đà Nẵng" }, admin, 201);
   async function employee(email, branchId = branch.id) {
     return call("POST", "/api/employees", { name: email, email, branchId, salaryType: "hourly", salary: "30000", bankName: "Test", bankAccountNumber: email.split("@")[0], bankAccountName: email }, admin, 201);
   }
@@ -112,11 +112,21 @@ test("HTTP liên service: hồ sơ, ca, công việc, tích lũy, xác nhận v�
   const secondToken = token({ userId: randomUUID(), employeeId: second.id, branchId: branch.id, role: "staff", clientPlatform: "mobile" });
   const outsiderToken = token({ userId: randomUUID(), employeeId: outsider.id, branchId: otherBranch.id, role: "staff", clientPlatform: "mobile" });
 
+  // Gán quản lý chi nhánh phải xác minh vai trò tài khoản qua Identity thật.
+  await call("PUT", `/api/branches/${branch.id}`, { managerId: first.id }, admin, 400);
+  const secondUser = users.find(row => row.employeeId === second.id);
+  await call("PUT", `/api/auth/users/${secondUser.id}`, { systemRole: "manager" });
+  const candidates = await call("GET", `/api/branches/${branch.id}/manager-candidates`);
+  assert.deepEqual(candidates.map(row => row.id), [second.id]);
+  const assigned = await call("PUT", `/api/branches/${branch.id}`, { managerId: second.id });
+  assert.equal(assigned.manager, second.name);
+  assert.equal(assigned.staff, 2);
+
   const template = await call("POST", "/api/shift-templates", { templateCode: "TEST-AM", name: "Ca sáng", startTime: "07:00", endTime: "12:00" }, admin, 201);
   const workDate = "2026-01-10";
-  const shift = await call("POST", "/api/shifts", { employeeId: first.id, workDate, templateId: template.id }, admin, 201);
-  await call("POST", "/api/shifts", { employeeId: first.id, workDate, templateId: template.id }, admin, 409);
-  await call("POST", "/api/shifts", { employeeId: second.id, workDate, templateId: template.id }, admin, 201);
+  const shift = await call("POST", "/api/shifts", { employeeId: first.id, branchId: branch.id, workDate, templateId: template.id }, admin, 201);
+  await call("POST", "/api/shifts", { employeeId: first.id, branchId: branch.id, workDate, templateId: template.id }, admin, 409);
+  await call("POST", "/api/shifts", { employeeId: second.id, branchId: branch.id, workDate, templateId: template.id }, admin, 201);
   const attendance = await call("PUT", `/api/attendance/${shift.id}`, { checkIn: `${workDate}T07:00:00+07:00`, checkOut: `${workDate}T12:00:00+07:00` });
   assert.ok(attendance.checkIn && attendance.checkOut);
 

@@ -17,6 +17,33 @@ async function setup() {
   const password = await service.resetPasswordByAdminUseCase({ email: employee.email, actor: admin });
   return { ...synced.body.data.user, password: password.tempPassword };
 }
+
+test("internal employee roles come from accounts and expose only employeeId/systemRole", async () => {
+  const user = await setup();
+  const path = "/api/auth/internal/employee-roles";
+  const payload = { employeeIds: [user.employeeId, crypto.randomUUID(), user.employeeId] };
+  assert.equal((await request(app).post(path).send(payload)).status, 403);
+  const query = () => request(app).post(path).set("x-internal-token", config.internalToken);
+  assert.equal((await query().send({ employeeIds: ["bad-id"] })).status, 400);
+  assert.equal((await query().send({})).status, 400);
+  assert.equal((await query().send({ employeeIds: Array(501).fill(user.employeeId) })).status, 400);
+  assert.deepEqual((await query().send(payload)).body.data, [{ employeeId: user.employeeId, systemRole: "staff" }]);
+  await service.updateUserUseCase(user.id, { systemRole: "manager" }, admin);
+  const result = await query().send(payload);
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.data, [{ employeeId: user.employeeId, systemRole: "manager" }]);
+});
+test("internal user name lookup requires internal token and only returns ID and name", async () => {
+  const user = await setup();
+  const path = `/api/auth/internal/users/${user.id}/name`;
+  assert.equal((await request(app).get(path)).status, 403);
+  assert.equal((await request(app).get(path).set("x-internal-token", "incorrect")).status, 403);
+  const result = await request(app).get(path).set("x-internal-token", config.internalToken);
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.data, { id: user.id, name: user.name });
+  assert.equal((await request(app).get("/api/auth/internal/users/invalid/name").set("x-internal-token", config.internalToken)).status, 400);
+});
+
 test("mobile staff cannot use web; logout invalidates registered refresh", async () => {
   const user = await setup();
   assert.equal((await request(app).post("/api/auth/login").send({ email: user.email, password: user.password })).status, 403);

@@ -11,6 +11,8 @@ const { correlationMiddleware } = require("./middlewares/logging");
 const { createAuthMiddleware } = require("./middlewares/auth");
 const { createAuthorizeMiddleware } = require("./middlewares/authorize");
 const { createRateLimitMiddleware } = require("./middlewares/rateLimit");
+const { createClientContextMiddleware } = require("./middlewares/clientContext");
+const { sendError } = require("./utils/soapFault");
 
 const app = express();
 
@@ -19,6 +21,10 @@ app.use(morgan("dev"));
 app.use(cors({ origin: config.corsOrigin, credentials: true }));
 app.use(cookieParser());
 app.use(correlationMiddleware);
+// Chuẩn hóa nền tảng + IP thật của client TRƯỚC khi rate-limit và proxy:
+// mọi header x-client-platform / x-client-ip / x-forwarded-for do client gửi
+// đều bị loại bỏ (clientContext), Gateway tự tính rồi gắn lại xuống hạ tầng.
+app.use(createClientContextMiddleware());
 
 app.get("/health", (_req, res) => {
   res.status(200).json({ status: "ok", service: config.serviceName, time: new Date().toISOString() });
@@ -47,6 +53,13 @@ function proxyTo(pathFilter, target, label) {
           h.startsWith("x-user-") || ["x-employee-id", "x-branch-id", "x-branch-slug", "x-internal-token"].includes(h))) {
           proxyReq.removeHeader(h);
         }
+        // Nền tảng và IP: chỉ Gateway được quyết định. Xóa bản client gửi
+        // (đã bị xóa ở clientContext) rồi gắn bản đã chuẩn hóa.
+        for (const h of ["x-client-platform", "x-client-ip", "x-forwarded-for"]) {
+          proxyReq.removeHeader(h);
+        }
+        proxyReq.setHeader("x-client-platform", req.clientPlatform || "mobile");
+        if (req.clientIp) proxyReq.setHeader("x-client-ip", req.clientIp);
         // Chuyển danh tính đã verify sang service phía sau, service không cần re-verify.
         if (req.user) {
           if (req.user.userId) proxyReq.setHeader("x-user-id", String(req.user.userId));
@@ -60,12 +73,10 @@ function proxyTo(pathFilter, target, label) {
           proxyReq.setHeader("x-correlation-id", req.correlationId);
         }
       },
-      error: (err, _req, res) => {
+      error: (err, req, res) => {
         console.warn(`[gateway] ${label} lỗi:`, err.message);
         if (!res.headersSent) {
-          res.status(502).json({
-            error: { code: "BAD_GATEWAY", message: `Không kết nối được ${label}` },
-          });
+          sendError(req, res, 502, "BAD_GATEWAY", `Không kết nối được ${label}`);
         }
       },
     },
@@ -96,8 +107,8 @@ app.use(proxyTo("/api/upload", config.targets.integration, "integration-service"
 app.use(proxyTo("/api/backlog", config.targets.integration, "integration-service"));
 app.use(proxyTo("/api/files", config.targets.integration, "integration-service"));
 
-app.use((_req, res) => {
-  res.status(404).json({ error: { code: "NOT_FOUND", message: "Không tìm thấy tài nguyên" } });
+app.use((req, res) => {
+  sendError(req, res, 404, "NOT_FOUND", "Không tìm thấy tài nguyên");
 });
 
 app.use(errorHandler);

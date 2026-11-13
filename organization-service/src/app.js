@@ -17,6 +17,8 @@ app.get("/health", (_req, res) => {
   res.status(200).json({ status: "ok", service: config.serviceName, time: new Date().toISOString() });
 });
 
+app.use("/api", require("./middlewares/dateContract").dateContract(config.internalToken));
+
 app.use("/api", orgRoutes);
 
 app.use((_req, res) => {

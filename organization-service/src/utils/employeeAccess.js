@@ -1,6 +1,6 @@
 "use strict";
 const config = require("../config");
-const { ForbiddenError } = require("./errors");
+const { ForbiddenError, UnauthorizedError } = require("./errors");
 const selfFields = ["name","phone","gender","birthDate","province","ward","street","cccd","issueDate","issuePlace","cccdFront","cccdBack","avatar","bankName","bankAccountNumber","bankAccountName"];
 function callerFrom(req) {
   return {
@@ -13,8 +13,9 @@ function callerFrom(req) {
   };
 }
 function assertAuthenticated(caller) {
+  // Chưa xác thực => 401 UNAUTHORIZED; đã xác thực nhưng thiếu quyền => 403 FORBIDDEN.
   if (caller?.internal || (caller?.userId && ["admin","manager","staff"].includes(caller.role))) return;
-  const error = new Error("Vui lòng đăng nhập để tiếp tục"); error.status = 401; error.code = "UNAUTHORIZED"; throw error;
+  throw new UnauthorizedError("Chưa xác thực, vui lòng đăng nhập để tiếp tục");
 }
 function isSelf(row, caller) { return Boolean(caller.employeeId) && row.id === caller.employeeId; }
 function assertEmployeeRead(row, caller) {

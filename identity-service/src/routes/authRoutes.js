@@ -14,6 +14,11 @@ router.post("/forgot-password", AuthController.forgotPassword);
 
 // Chỉ service nội bộ gọi thẳng, không qua gateway.
 router.post("/sync-employee", internalOnly, AuthController.syncEmployee);
+router.get("/internal/users/:id/name", internalOnly, AuthController.getUserName);
+router.post("/internal/employee-roles", internalOnly, async (req, res, next) => {
+  try { res.json({ data: await require("../services/AuthService").getEmployeeRolesUseCase(req.body?.employeeIds) }); }
+  catch (error) { next(error); }
+});
 
 // Protected routes (cần phiên đăng nhập)
 router.get("/me", sessionMiddleware, AuthController.me);

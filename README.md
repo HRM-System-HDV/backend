@@ -33,6 +33,14 @@ Các script gốc chạy trên Windows và Unix. Với PowerShell chặn `npm.ps
 - Test dùng dữ liệu cô lập, không chứng minh migration hay truy vấn trên DB thật đã chạy thành công.
 - Migration mới chứa các CHECK/index đã chốt. `npm run test:database` kiểm chứng ghi dữ liệu và ràng buộc trên DB cấu hình trong `.env`, rồi rollback toàn bộ bản ghi thử; cần Postgres đang chạy. `npm run test:flow` chạy sáu service HTTP cô lập bằng memory, không kết nối DB thật.
 
+## Hợp đồng quản lý chi nhánh
+
+- FE tạo/sửa bằng `{ name, address, managerId, status }`; `address` bắt buộc, `status` chỉ nhận `hoạt động` hoặc `vô hiệu hóa`. Khi tạo, `managerId` để `null`; sau đó gán nhân viên vào chi nhánh rồi chọn quản lý.
+- BE trả thêm `manager` (tên từ hồ sơ nhân sự), `staff` (số nhân viên `đang làm`, bao gồm quản lý), `branchCode` và `createdAt`. Không gửi `manager`, `staff` hoặc `branchCode` trong payload ghi.
+- Admin thao tác mọi chi nhánh. Manager được tạo và xem danh sách, chỉ sửa/xóa chi nhánh mang `branchId` trong phiên đăng nhập. Staff không ghi chi nhánh.
+- `GET /api/branches/:id/manager-candidates` trả `{ id, name, systemRole }` của nhân viên đang làm tại chi nhánh, có tài khoản Manager/Admin. BE xác minh vai trò qua Identity cả khi liệt kê lẫn khi gán; chức danh nhân sự không quyết định quyền.
+- `POST /api/auth/internal/employee-roles` chỉ dành cho kết nối service bằng token nội bộ, tối đa 500 employee ID mỗi lần; gateway chặn truy cập từ bên ngoài.
+
 ## Cấu hình và chạy
 
 Sao chép `.env.example` thành `.env` riêng của từng service rồi điền giá trị local. Không commit `.env` thật. `docker-compose.yml` chỉ mô tả hạ tầng năm Postgres riêng trên các cổng 5433–5437; không tự khởi chạy hoặc reset DB khi test.
@@ -62,7 +70,8 @@ Gateway xác thực JWT rồi xóa header danh tính do client tự gửi trư�
 - Vai trò kiểm tra tại Gateway và service; quyền đối với bản ghi/chi nhánh/cá nhân do service kiểm tra.
 - `INTERNAL_API_TOKEN` là cấu hình chung cho các cuộc gọi nội bộ qua header `x-internal-token`, timeout tối đa 5000ms. Gateway không chuyển tiếp token nội bộ do client gửi.
 - Tên tiếng Việt trong `x-user-name` được URI-encode khi gửi header và decode ở service nhận; không gửi Unicode thô trong HTTP header.
-- Không dùng slug hoặc tên làm khóa liên kết. API dùng UUID, ngày ISO, kỳ lương `YYYY-MM`, tiền Decimal. Không trả nguyên BigInt/Decimal theo định dạng không tuần tự hóa được.
+- Không dùng slug hoặc tên làm khóa liên kết. API dùng UUID; ngày nghiệp vụ phía client là `DD/MM/YYYY`, kỳ lương `MM-YYYY`. Gọi nội bộ có credential giữ ngày ISO và kỳ `YYYY-MM`; DB giữ kiểu ngày gốc. Mốc thời gian có giờ/múi giờ vẫn là ISO. Tiền dùng Decimal và được tuần tự hóa thành chuỗi.
+- Phân ca nhận `branchId`, `employeeId`, `templateId`, `workDate`; chi nhánh phải khớp nhân viên. Giờ ca lấy từ ca mẫu; không còn trường `note`. Migration `20261113170000_shift_branch_contract` thêm chi nhánh và bỏ cột ghi chú cũ.
 
 ## Các luồng phải giữ đúng
 
@@ -85,6 +94,9 @@ Mọi lệnh chi cần `idempotencyKey`, tài khoản nguồn và phiếu lươn
 Không sử dụng tài khoản hoặc mật khẩu mẫu ghi trong tài liệu cũ làm thông tin đăng nhập môi trường thật. Seed chỉ được chạy chủ động sau khi schema/migration và dữ liệu khởi tạo được chốt.
 
 ## Giới hạn vận hành hiện tại
+
+- `PUT /api/notifications/read-all` đánh dấu các thông báo chưa đọc của chính nhân viên trong phiên; tài khoản chưa gắn hồ sơ trả `{ count: 0 }`.
+- Admin sửa phiếu chưa xác nhận qua `PUT /api/payroll/payslips/:id` với `bonus`, `totalPenalty` và `adjustmentReason`. `totalPenalty` là tổng phạt nhập trực tiếp, thay thế mức tự tính; gửi `null` để dùng lại mức phạt từ chấm công. Giá trị nhập được giữ khi xác nhận và chi lương. Phiếu đã xác nhận/đã thanh toán không được sửa. Cần migration `20261113150000_payslip_manual_penalty` và sinh lại Prisma Client.
 
 - Nhắc chấm công được tạo khi client lấy thông báo/gọi nhắc giờ; chưa có scheduler hoặc push nền khi ứng dụng không hoạt động.
 - Nhật ký thao tác nhập giờ ở Work được gửi sang Integration theo best-effort; nếu Integration ngừng hoạt động, lưu công thành công không bị báo thất bại giả.

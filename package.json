@@ -7,12 +7,15 @@
     "test": "node scripts/services.cjs test",
     "test:database": "node scripts/verify-database.cjs",
     "test:flow": "node --test tests/service-flow.test.cjs",
+    "test:contracts": "node --test tests/public-contract.test.cjs",
     "test:coverage": "node scripts/services.cjs coverage",
     "install:all": "node scripts/services.cjs install",
     "prisma:generate": "node scripts/services.cjs generate",
-    "prisma:deploy": "node scripts/services.cjs deploy",
+    "prisma:deploy": "node scripts/services.cjs deploy && npm run prisma:check",
     "prisma:seed": "node scripts/services.cjs seed",
-    "db:setup": "npm run prisma:generate && npm run prisma:deploy && npm run prisma:seed"
+    "prisma:check": "node scripts/verify-schema-drift.cjs",
+    "db:setup": "npm run prisma:generate && npm run prisma:deploy",
+    "db:seed": "npm run prisma:seed"
   },
   "engines": {
     "node": ">=18"

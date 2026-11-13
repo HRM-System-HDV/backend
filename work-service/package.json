@@ -11,7 +11,7 @@
     "test:coverage": "c8 --reporter=text --reporter=lcov node --test tests/unit/*.test.js tests/integration/*.test.js",
     "prisma:generate": "prisma generate",
     "prisma:deploy": "prisma migrate deploy",
-    "prisma:migrate": "prisma migrate dev"
+    "prisma:migrate": "npm run prisma:deploy"
   },
   "dependencies": {
     "@prisma/client": "^5.18.0",

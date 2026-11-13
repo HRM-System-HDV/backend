@@ -37,9 +37,20 @@ class ForbiddenError extends Error {
   }
 }
 
+// 401 = request CHƯA xác thực; 403 (ForbiddenError) = đã xác thực nhưng thiếu quyền.
+// Chuẩn chung của dự án (docs/RULES.md §5.3).
+class UnauthorizedError extends Error {
+  constructor(message) {
+    super(message || "Vui lòng đăng nhập để tiếp tục");
+    this.name = "UnauthorizedError";
+    this.status = 401;
+    this.code = "UNAUTHORIZED";
+  }
+}
+
 class ConflictError extends Error {
   constructor(message = "Dữ liệu đã tồn tại hoặc vừa thay đổi, vui lòng tải lại") {
     super(message); this.status = 409; this.code = "DUPLICATE_RESOURCE";
   }
 }
-module.exports = { ValidationError, NotFoundError, ForbiddenError, InternalServerError, ConflictError };
+module.exports = { ValidationError, NotFoundError, ForbiddenError, UnauthorizedError, InternalServerError, ConflictError };

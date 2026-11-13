@@ -32,6 +32,8 @@ app.get("/health", (_req, res) => {
   });
 });
 
+app.use("/api", require("./middlewares/dateContract").dateContract(config.internalToken));
+
 app.use("/api",(req,_res,next)=>{try{req.actor=actor(req);next();}catch(e){next(e);}});
 for(const [route,kind] of [["news","news"],["regulations","regulation"],["wifi-configs","wifiConfig"]]) {
   app.get(`/api/${route}`,h((req,who)=>s.contentList(kind,req.query,who)));
@@ -50,6 +52,7 @@ app.put("/api/notifications/settings",h((req,who)=>s.notificationSettings(who,re
 app.post("/api/notifications/reminders",h((_req,who)=>s.reminders(who)));
 app.get("/api/notifications",h(async(_req,who)=>{await s.reminders(who);return s.listNotifications(who);}));
 app.post("/api/notifications",h((req,who)=>s.sendNotification(req.body,who),201));
+app.put("/api/notifications/read-all",h((_req,who)=>s.readAllNotifications(who)));
 app.put("/api/notifications/:id/read",h((req,who)=>s.readNotification(req.params.id,who)));
 app.get("/api/soap-config",h((_req,who)=>s.soapConfig(who)));
 app.put("/api/soap-config",h((req,who)=>s.soapConfig(who,req.body)));

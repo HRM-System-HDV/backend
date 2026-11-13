@@ -3,8 +3,10 @@ const {randomUUID} = require("node:crypto");
 const database = require("../config/database");
 const clients = require("../clients/ServiceClient");
 const {admin, manager, branch, uuid, error} = require("../utils/access");
+const {matchesWhere} = require("../utils/where");
 const memory = Object.fromEntries(["request","notification","notificationSetting","news","regulation","wifiConfig","backlog","soapGatewayConfig"].map(key => [key, []]));
 const types = ["leave","advance","shift_swap","work_supplement"];
+const statuses = ["pending","approved","rejected"];
 const dateFields = ["leaveStartDate","leaveEndDate","publishDate","effectiveDate","expiryDate"];
 const instantFields = ["requestedCheckIn","requestedCheckOut","reviewedAt","lastPingTime","certExpiry"];
 function text(value, label) { if (typeof value !== "string" || !value.trim()) throw error(`Thiếu ${label}`); return value.trim(); }
@@ -24,34 +26,106 @@ function serialize(row) {
   if (out.advanceAmount != null) out.advanceAmount = out.advanceAmount.toString();
   return out;
 }
-async function all(kind, where = {}) { const db = database.getPrisma(); return (db ? await db[kind].findMany({where}) : memory[kind].filter(row => Object.entries(where).every(([key,value]) => row[key] === value))).map(serialize); }
+async function all(kind, where = {}) { const db = database.getPrisma(); return (db ? await db[kind].findMany({where}) : memory[kind].filter(row => matchesWhere(row, where))).map(serialize); }
 async function get(kind,id) { uuid(id); const db=database.getPrisma(); const row=db ? await db[kind].findUnique({where:{id}}) : memory[kind].find(row=>row.id===id); if (!row) throw error("Không tìm thấy dữ liệu",404,"NOT_FOUND"); return serialize(row); }
 async function add(kind,data) { const db=database.getPrisma(); const prepared=dates(data); if (db) return serialize(await db[kind].create({data:prepared})); const row={id:randomUUID(),createdAt:new Date().toISOString(),...serialize(prepared)}; memory[kind].push(row); return {...row}; }
 async function save(kind,id,data) { const db=database.getPrisma(); const prepared=dates(data); if (db) return serialize(await db[kind].update({where:{id},data:prepared})); const row=memory[kind].find(row=>row.id===id); if (!row) throw error("Không tìm thấy dữ liệu",404,"NOT_FOUND"); Object.assign(row,serialize(prepared)); return {...row}; }
 async function remove(kind,id) { await get(kind,id); const db=database.getPrisma(); if (db) await db[kind].delete({where:{id}}); else {memory[kind].splice(memory[kind].findIndex(row=>row.id===id),1);if(kind==="request")for(const row of memory.notification)if(row.requestId===id)row.requestId=null;} return {deleted:true}; }
 function scope(who, value, write=false) { if (write && who.role !== "admin") {if(value !== undefined && value !== who.branchId) throw error("Không được ghi ngoài chi nhánh của mình",403,"FORBIDDEN");return (branch(who,who.branchId,true),who.branchId);} if (value != null) uuid(value,"branchId"); branch(who,value,write); return value || null; }
 function requestRead(row,who) { if (who.role === "admin") return; if (who.role === "manager" && (!who.branchId || row.branchId !== who.branchId)) throw error("Đơn không thuộc chi nhánh được quản lý",403,"FORBIDDEN"); branch(who,row.branchId); if (who.role === "staff" && ![row.employeeId,row.targetEmployeeId].includes(who.employeeId)) throw error("Không được xem đơn người khác",403,"FORBIDDEN"); }
-function shiftTimes(shift) { const day=String(shift.workDate).slice(0,10); const start=Date.parse(`${day}T${shift.scheduledStart}:00+07:00`); let end=Date.parse(`${day}T${shift.scheduledEnd}:00+07:00`); if (end<=start) end+=86400000; return [start,end]; }
+// —— Phạm vi dữ liệu: dựng điều kiện WHERE cho Prisma ——
+// BUSINESS.md §9.3: phạm vi chi nhánh phải được BE áp dụng khi trả dữ liệu,
+// không lọc bằng JavaScript ở tầng ứng dụng.
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isUuid(value) { return UUID_PATTERN.test(String(value || "")); }
+function branchScopeCondition(field, branchId) { return { OR: [ { [field]: null }, { [field]: branchId ?? null } ] }; }
+// Phạm vi đọc của mẫu đơn, ánh xạ đúng logic requestRead() ở trên.
+function requestScopeWhere(who) {
+  if (who.role === "admin") return null;
+  if (who.role === "manager") return { branchId: who.branchId };
+  if (who.role === "staff") {
+    const owner = { OR: [ { employeeId: who.employeeId }, { targetEmployeeId: who.employeeId } ] };
+    if (who.internal) return owner;
+    return { AND: [ branchScopeCondition("branchId", who.branchId), owner ] };
+  }
+  return null;
+}
+// Phạm vi đọc của nội dung nội bộ (bảng tin/quy định/Wi-Fi).
+function contentScopeConditions(kind, field, query, who) {
+  const conditions = [];
+  if (kind === "wifiConfig") {
+    // Lệnh nội bộ chỉ đọc cấu hình đang hoạt động; admin đọc được toàn bộ.
+    if (who.internal) conditions.push({ status: "hoạt động" });
+  } else if (who.role !== "admin") {
+    conditions.push(branchScopeCondition(field, who.branchId));
+  }
+  if (query.branchId) conditions.push(kind === "wifiConfig" ? { [field]: query.branchId } : { OR: [ { [field]: query.branchId }, { [field]: null } ] });
+  return conditions;
+}
+function toWhere(conditions) { return conditions.length === 0 ? {} : conditions.length === 1 ? conditions[0] : { AND: conditions }; }
+function shiftDay(shift) { return shift.workDate instanceof Date ? shift.workDate.toISOString().slice(0,10) : String(shift.workDate || "").slice(0,10); }
+function shiftTimes(shift) { const day=shiftDay(shift); const start=Date.parse(`${day}T${shift.scheduledStart}:00+07:00`); let end=Date.parse(`${day}T${shift.scheduledEnd}:00+07:00`); if (!Number.isFinite(start) || !Number.isFinite(end)) throw error("Không đọc được thời gian của ca, không thể kiểm tra điều kiện đổi ca",422,"VALIDATION_ERROR"); if (end<=start) end+=86400000; return [start,end]; }
+// Trạng thái chấm công của ca: true = đã chấm công, false = chưa chấm công,
+// null = KHÔNG xác định được (service khác chưa trả kèm attendance).
+function checkedInState(shift) {
+  if (!shift) return null;
+  if (Object.prototype.hasOwnProperty.call(shift,"attendance") && shift.attendance !== undefined) return !!shift.attendance?.checkIn;
+  if (typeof shift.attendanceState === "string") {
+    if (["working","completed","missed_checkout"].includes(shift.attendanceState)) return true;
+    if (["not_started","missed_checkin"].includes(shift.attendanceState)) return false;
+  }
+  return null;
+}
+// Không phụ thuộc mùa vào việc service khác có trả `attendance` hay không:
+// nếu thiếu thì hỏi lại qua GET /api/shifts?employeeId= (đã có attendance),
+// vẫn không xác định được thì chặn (fail-closed) thay vì coi như "chưa chấm công".
+async function resolveCheckedIn(shift,label) {
+  let state = checkedInState(shift);
+  if (state === null && shift && shift.employeeId) {
+    try {
+      const list = await clients.shifts({employeeId: shift.employeeId});
+      const found = (list || []).find(item => item && item.id === shift.id);
+      if (found) state = checkedInState(found);
+    } catch { state = null; }
+  }
+  if (state === null) throw error(`Không xác định được trạng thái chấm công của ${label} nên không thể kiểm tra điều kiện đổi ca. Vui lòng thử lại sau.`,409,"CONFLICT");
+  return state;
+}
 async function validateSwap(data) {
   const source=await clients.shift(uuid(data.sourceShiftId,"sourceShiftId"));
   if (source.employeeId !== data.employeeId) throw error("Ca nguồn không thuộc người gửi đơn");
   const sourceTime=shiftTimes(source);
-  if (sourceTime[0]<=Date.now() || source.attendance?.checkIn || source.status === "đã hủy") throw error("Chỉ đề nghị đổi ca chưa tới giờ và chưa chấm công");
+  if (sourceTime[0]<=Date.now() || source.status === "đã hủy") throw error("Chỉ đề nghị đổi ca chưa tới giờ và chưa chấm công");
+  if (await resolveCheckedIn(source,"ca nguồn")) throw error("Chỉ đề nghị đổi ca chưa tới giờ và chưa chấm công");
   if (data.targetEmployeeId === data.employeeId) throw error("Không được nhờ chính mình");
   const targetEmployee=await clients.employee(uuid(data.targetEmployeeId,"targetEmployeeId"));
   if (targetEmployee.branchId !== data.branchId || targetEmployee.status === "nghỉ việc") throw error("Nhân viên đích không thuộc phạm vi làm việc hợp lệ");
   if (data.targetShiftId) {
     const target=await clients.shift(uuid(data.targetShiftId,"targetShiftId"));
-    if (target.employeeId !== data.targetEmployeeId || shiftTimes(target)[0]<=Date.now() || target.attendance?.checkIn) throw error("Ca đích không hợp lệ hoặc đã bắt đầu");
+    if (target.employeeId !== data.targetEmployeeId || shiftTimes(target)[0]<=Date.now()) throw error("Ca đích không hợp lệ hoặc đã bắt đầu");
+    if (await resolveCheckedIn(target,"ca đích")) throw error("Ca đích không hợp lệ hoặc đã bắt đầu");
   }
   const shifts=await clients.shifts({employeeId:data.targetEmployeeId});
   for (const other of shifts) {
     if (other.status === "đã hủy") continue;
     const [start,end]=shiftTimes(other);
-    if (String(other.workDate).slice(0,10)===String(source.workDate).slice(0,10) && other.templateId===source.templateId || start<sourceTime[1] && sourceTime[0]<end) throw error("Nhân viên đích đã có ca này hoặc ca chồng giờ",409,"DUPLICATE_RESOURCE");
+    if (shiftDay(other)===shiftDay(source) && other.templateId===source.templateId || start<sourceTime[1] && sourceTime[0]<end) throw error("Nhân viên đích đã có ca này hoặc ca chồng giờ",409,"DUPLICATE_RESOURCE");
   }
 }
-async function listRequests(query,who) { return (await all("request")).filter(row=>{ try { requestRead(row,who); return ["employeeId","status","type"].every(key=>!query[key] || row[key]===query[key]); } catch { return false; } }); }
+async function listRequests(query,who) {
+  // Quản lý không có chi nhánh thì không được xem đơn nào (trước đây mọi dòng đều bị loại).
+  if (who.role === "manager" && !who.branchId) return [];
+  // Nhân viên chưa gắn hồ sơ nhân sự thì không xem được đơn nào.
+  if (who.role === "staff" && !who.employeeId) return [];
+  if (query.employeeId && !isUuid(query.employeeId)) return [];
+  if (query.status && !statuses.includes(query.status)) return [];
+  if (query.type && !types.includes(query.type)) return [];
+  const conditions = [];
+  const scope = requestScopeWhere(who);
+  if (scope) conditions.push(scope);
+  for (const key of ["employeeId","status","type"]) if (query[key]) conditions.push({ [key]: query[key] });
+  return all("request", toWhere(conditions));
+}
 async function createRequest(body,who) {
   const data=pick(body,["type","employeeId","targetEmployeeId","branchId","title","content","attachmentUrl","leaveStartDate","leaveEndDate","advanceAmount","sourceShiftId","targetShiftId","requestedCheckIn","requestedCheckOut"]);
   if (!types.includes(data.type)) throw error("Loại đơn không hợp lệ");
@@ -63,7 +137,7 @@ async function createRequest(body,who) {
   if (data.type === "leave" && (!data.leaveStartDate || !data.leaveEndDate || data.leaveEndDate<data.leaveStartDate)) throw error("Khoảng ngày nghỉ không hợp lệ");
   if (data.type === "advance" && (!/^\d{1,15}$/.test(String(data.advanceAmount)) || BigInt(data.advanceAmount)<=0n)) throw error("Số tiền ứng phải là số nguyên dương tối đa 15 chữ số");
   if (data.type === "work_supplement") { uuid(data.sourceShiftId,"sourceShiftId"); if (!data.requestedCheckIn && !data.requestedCheckOut || data.requestedCheckIn && data.requestedCheckOut && Date.parse(data.requestedCheckOut)<Date.parse(data.requestedCheckIn)) throw error("Giờ đề nghị không hợp lệ"); const shift=await clients.shift(data.sourceShiftId); if (shift.employeeId!==data.employeeId) throw error("Ca không thuộc nhân viên"); }
-  if (data.type === "shift_swap") { await validateSwap(data); data.shiftSwapMode=(await clients.attendanceConfig()).shiftSwapMode; }
+  if (data.type === "shift_swap") { await validateSwap(data); data.shiftSwapMode=(await clients.attendanceConfig(data.branchId)).shiftSwapMode; }
   const row=await add("request",{...data,status:"pending"});
   if (row.targetEmployeeId) await sendNotification({targetEmployeeId:row.targetEmployeeId,branchId:row.branchId,title:row.title,body:row.content,requestId:row.id,requestType:row.type},who,true).catch(e=>console.warn("Không gửi được thông báo đơn:",e.message));
   return row;
@@ -83,21 +157,58 @@ async function reviewRequest(id,approved,body,who,peer=false) {
   return updated;
 }
 async function deleteRequest(id,who) { const row=await get("request",id); requestRead(row,who); manager(who); branch(who,row.branchId,true); if(row.status!=="pending") throw error("Chỉ xóa đơn đang chờ"); return remove("request",id); }
+// Mức cô lập Serializable cho ghi fanout (Prisma enum = chuỗi "Serializable").
+function serializableIsolation() { try { return require("@prisma/client").Prisma.TransactionIsolationLevel.Serializable; } catch { return "Serializable"; } }
+// Ghi fanout thông báo: mỗi người nhận một dòng (BUSINESS.md §9.2) nhưng phải ghi
+// NGUYÊN TẬM — lỗi giữa chừng không được để lại danh sách người nhận dở dang.
+async function createNotifications(items) {
+  if (!items.length) return [];
+  const db = database.getPrisma();
+  if (db) {
+    const rows = await db.$transaction(async (tx) => {
+      const created = [];
+      for (const item of items) created.push(await tx.notification.create({ data: dates(item) }));
+      return created;
+    }, { isolationLevel: serializableIsolation(), maxWait: 5000, timeout: 15000 });
+    return rows.map(serialize);
+  }
+  // Kho in-memory: ghi tạm rồi mới commit, lỗi thì rollback về trạng thái cũ.
+  const snapshot = memory.notification.length;
+  try {
+    return items.map(item => {
+      const row = { id: randomUUID(), createdAt: new Date().toISOString(), ...serialize(dates(item)) };
+      memory.notification.push(row);
+      return { ...row };
+    });
+  } catch (e) { memory.notification.length = snapshot; throw e; }
+}
 async function sendNotification(body,who,system=false) {
   if (!system) manager(who);
   const data=pick(body,["targetEmployeeId","branchId","title","body","metadata","requestId","requestType"]);
   data.title=text(data.title,"tiêu đề"); data.body=text(data.body,"nội dung"); data.branchId=scope(who,data.branchId,!system);
   if (data.requestId) { const request=await get("request",data.requestId); data.requestType=request.type; }
   const employees=data.targetEmployeeId ? [await clients.employee(uuid(data.targetEmployeeId,"targetEmployeeId"))] : await clients.employees(data.branchId?{branchId:data.branchId}:{});
-  const rows=[];
+  const items=[];
   for(const employee of employees) {
     if (data.branchId && employee.branchId!==data.branchId) throw error("Người nhận ngoài phạm vi thông báo",403,"FORBIDDEN");
-    rows.push(await add("notification",{...data,targetEmployeeId:employee.id,isRead:false,senderId:who.userId,senderName:who.name}));
+    items.push({...data,targetEmployeeId:employee.id,isRead:false,senderId:who.userId,senderName:who.name});
   }
+  const rows=await createNotifications(items);
   return rows.length===1 ? rows[0] : rows;
 }
 async function listNotifications(who) { if(!who.employeeId) return []; return all("notification",{targetEmployeeId:who.employeeId}); }
 async function readNotification(id,who) { const row=await get("notification",id); if(row.targetEmployeeId!==who.employeeId) throw error("Không được sửa thông báo người khác",403,"FORBIDDEN"); return save("notification",id,{isRead:true}); }
+async function readAllNotifications(who) {
+  if (!who.employeeId) return { count: 0 };
+  const targetEmployeeId = uuid(who.employeeId, "employeeId");
+  const db = database.getPrisma();
+  if (db) return db.notification.updateMany({ where: { targetEmployeeId, isRead: false }, data: { isRead: true } });
+  let count = 0;
+  for (const row of memory.notification) {
+    if (row.targetEmployeeId === targetEmployeeId && !row.isRead) { row.isRead = true; count++; }
+  }
+  return { count };
+}
 const settingFields=["checkInBefore1Hour","checkInBefore30Min","checkInBefore10Min","checkOutBefore10Min","missedCheckOutAfter10Min","missedCheckOutAfter30Min","missedCheckOutAfter1Hour","tabNotificationAlert","soundEnabled","vibrateEnabled"];
 async function notificationSettings(who,body) {
   uuid(who.userId,"userId"); const data=body ? pick(body,settingFields) : {};
@@ -111,6 +222,8 @@ async function reminders(who,now=new Date()) {
   const settings=await notificationSettings(who); const shifts=await clients.shifts({employeeId:who.employeeId}); const current=await listNotifications(who); const added=[];
   const rules=[["checkInBefore1Hour",-60,"in"],["checkInBefore30Min",-30,"in"],["checkInBefore10Min",-10,"in"],["checkOutBefore10Min",-10,"out"],["missedCheckOutAfter10Min",10,"out"],["missedCheckOutAfter30Min",30,"out"],["missedCheckOutAfter1Hour",60,"out"]];
   for(const shift of shifts) { if(shift.status==="đã hủy") continue; const [start,end]=shiftTimes(shift);
+    // Không xác định được trạng thái chấm công thì không gửi nhắc (tránh nhắc sai).
+    if (checkedInState(shift) === null) continue;
     for(const [key,minutes,side] of rules) { if(!settings[key] || side==="in" && shift.attendance?.checkIn || side==="out" && (!shift.attendance?.checkIn || shift.attendance?.checkOut)) continue;
       const due=(side==="in"?start:end)+minutes*60000; if(now.getTime()<due || now.getTime()>=due+60000) continue;
       const reminderKey=`${shift.id}:${key}`; if(current.some(row=>row.metadata?.reminderKey===reminderKey)) continue;
@@ -121,11 +234,10 @@ async function reminders(who,now=new Date()) {
 const contentFields={news:["title","summary","content","publishDate","tag","pinned","branchId"],regulation:["regulationCode","title","category","summary","content","status","scopeBranchId","effectiveDate","expiryDate","version","pinned"],wifiConfig:["ssid","bssid","branchId","status"]};
 async function contentList(kind,query,who) {
   if(kind==="wifiConfig" && !who.internal) admin(who);
-  const field=kind==="regulation"?"scopeBranchId":"branchId"; const rows=await all(kind); return rows.filter(row=>{
-    if(kind==="wifiConfig") { if(who.internal) return (!query.branchId || row.branchId===query.branchId) && row.status==="hoạt động"; admin(who); }
-    if(who.role!=="admin" && row[field]!=null && row[field]!==who.branchId) return false;
-    return !query.branchId || row[field]===query.branchId || kind!=="wifiConfig" && row[field]===null;
-  });
+  const field=kind==="regulation"?"scopeBranchId":"branchId";
+  // branchId sai định dạng UUID thì không có dòng nào khớp — trả rỗng, không lỗi.
+  if(query.branchId && !isUuid(query.branchId)) return [];
+  return all(kind, toWhere(contentScopeConditions(kind,field,query,who)));
 }
 async function contentWrite(kind,id,body,who) {
   if(kind==="wifiConfig") admin(who); else manager(who);
@@ -157,4 +269,4 @@ async function soapConfig(who,body) {
   return row?save("soapGatewayConfig",row.id,data):add("soapGatewayConfig",{isSingleton:true,status:"unknown",...data});
 }
 async function ping(who) { const row=await soapConfig(who); if(!row) throw error("Chưa cấu hình SOAP"); const start=Date.now(); const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),5000); let status="down"; try{const response=await fetch(row.wsdlUrl,{signal:controller.signal});status=response.ok?"healthy":"degraded";await response.body?.cancel();}catch{}finally{clearTimeout(timer);} return save("soapGatewayConfig",row.id,{status,lastPingTime:new Date().toISOString(),avgResponseTime:`${Date.now()-start}ms`}); }
-module.exports={listRequests,createRequest,reviewRequest,deleteRequest,getRequest:async(id,who)=>{const row=await get("request",id);requestRead(row,who);return row;},sendNotification,listNotifications,readNotification,notificationSettings,reminders,contentList,contentWrite,contentGet,contentDelete,backlog,listBacklog,soapConfig,ping};
+module.exports={listRequests,createRequest,reviewRequest,deleteRequest,getRequest:async(id,who)=>{const row=await get("request",id);requestRead(row,who);return row;},sendNotification,listNotifications,readNotification,readAllNotifications,notificationSettings,reminders,contentList,contentWrite,contentGet,contentDelete,backlog,listBacklog,soapConfig,ping};

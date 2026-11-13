@@ -26,18 +26,40 @@ async function saveUser(id, data) {
   Object.assign(row, data);
   return row;
 }
+// Nền tảng client (web/mobile) do API Gateway quyết định và truyền xuống qua
+// header `x-client-platform` (Gateway đã xóa header giả mạo của client trước khi
+// forward). Vì vậy:
+//   - Ưu tiên header `x-client-platform` làm giá trị chuẩn.
+//   - `body.clientPlatform` là dữ liệu KHÔNG TIN CẬY khi request đi qua Gateway
+//     (client tự khai nền tảng được) -> chỉ dùng làm fallback cho lệnh gọi nội
+//     bộ gọi thẳng identity-service mà không qua Gateway.
 function clientPlatform(body = {}, req) {
-  const value = body.clientPlatform || req?.headers?.["x-client-platform"] || "web";
+  const fromHeader = String((req?.headers || {})["x-client-platform"] || "").trim().toLowerCase();
+  const fromBody = String(body.clientPlatform || "").trim().toLowerCase();
+  const value = fromHeader || fromBody || "web";
   if (!["web", "mobile"].includes(value)) throw new ValidationError("clientPlatform chỉ nhận web hoặc mobile");
   return value;
 }
+// Nhân viên (staff) chỉ được đăng nhập trên Mobile (RULES.md §7); admin và
+// manager dùng được cả hai nền tảng nên không bị chặn. Ngoài ra phiên staff
+// không được dùng cookie phiên web (hrm-session / hrm-refresh).
 function requirePlatform(user, platform, req) {
-  if (user.systemRole === "staff" && (platform !== "mobile" || req?.cookies?.["hrm-refresh"] || req?.cookies?.["hrm-session"])) throw new ForbiddenError("Nhân viên chỉ được đăng nhập trên Mobile");
+  if (user.systemRole !== "staff") return;
+  if (platform !== "mobile") throw new ForbiddenError("Nhân viên chỉ được đăng nhập trên Mobile");
+  if (req?.cookies?.["hrm-refresh"] || req?.cookies?.["hrm-session"]) {
+    throw new ForbiddenError("Nhân viên chỉ được đăng nhập trên Mobile");
+  }
 }
 function clientInfo(req = {}) {
   const headers = req.headers || {};
   const read = name => { try { return headers[name] ? decodeURIComponent(String(headers[name])) : null; } catch { return String(headers[name]); } };
-  return { deviceName: read("x-device-name") || "Thiết bị không xác định", deviceType: read("x-device-type"), osInfo: read("x-os-info"), location: read("x-location"), ipAddress: String(headers["x-forwarded-for"] || req.socket?.remoteAddress || "").split(",")[0].trim() || null };
+  // IP lấy từ header `x-client-ip` do Gateway chuẩn hóa từ socket. Tuyệt đối
+  // không tin `x-forwarded-for` do client gửi vì client tự giả mạo được.
+  const rawIp = String(headers["x-client-ip"] || (req.socket && req.socket.remoteAddress) || "").trim();
+  const ipAddress = rawIp ? (rawIp.startsWith("::ffff:") ? rawIp.slice(7) : rawIp) : null;
+  // `location` chỉ là dữ liệu hiển thị cho người dùng (client tự khai), KHÔNG
+  // dùng để quyết định bảo mật.
+  return { deviceName: read("x-device-name") || "Thiết bị không xác định", deviceType: read("x-device-type"), osInfo: read("x-os-info"), location: read("x-location"), ipAddress };
 }
 async function registerDevice(userId, req) {
   const data = { userId, ...clientInfo(req), lastSeenAt: new Date() };
@@ -129,6 +151,8 @@ async function refreshTokenUseCase(body = {}, req) {
   if (!device || device.userId !== payload.userId) throw new UnauthorizedError("Phiên thiết bị đã bị thu hồi");
   const row = await findUser({ id: payload.userId });
   if (!row) throw new UnauthorizedError("Tài khoản không còn tồn tại");
+  // Nền tảng khi refresh: header do Gateway set là chuẩn; nếu gọi nội bộ không
+  // qua Gateway thì lấy từ body, cuối cùng mới dùng nền tảng đã ký trong token.
   const platform = clientPlatform({ clientPlatform: body.clientPlatform || payload.clientPlatform }, req);
   if (platform !== payload.clientPlatform) throw new ForbiddenError("Không được chuyển nền tảng bằng refresh token");
   requirePlatform(row, platform, req);
@@ -200,6 +224,14 @@ async function listUsersUseCase(actor) {
   const rows = prisma ? await prisma.user.findMany({ orderBy: { createdAt: "desc" } }) : [...users.values()];
   return rows.map(toSafeUser);
 }
+async function getEmployeeRolesUseCase(employeeIds) {
+  if (!Array.isArray(employeeIds) || employeeIds.length > 500 || employeeIds.some(id => !isUuid(id))) throw new ValidationError("employeeIds phải là danh sách tối đa 500 UUID");
+  if (!employeeIds.length) return [];
+  const ids = [...new Set(employeeIds)];
+  const prisma = database.getPrisma();
+  return prisma ? prisma.user.findMany({ where: { employeeId: { in: ids } }, select: { employeeId: true, systemRole: true } })
+    : [...users.values()].filter(row => ids.includes(row.employeeId)).map(row => ({ employeeId: row.employeeId, systemRole: row.systemRole }));
+}
 async function updateUserUseCase(id, body, actor) {
   requireAdmin(actor);
   if (!isUuid(id) || !ALLOWED_ROLES.includes(body.systemRole)) throw new ValidationError("ID hoặc vai trò không hợp lệ");
@@ -208,4 +240,4 @@ async function updateUserUseCase(id, body, actor) {
   await revokeSessions(id);
   return toSafeUser(row);
 }
-module.exports = { ALLOWED_ROLES, toSafeUser, clientPlatform, loginUseCase, getMeUseCase, changePasswordUseCase, forgotPasswordUseCase, resetPasswordByAdminUseCase, refreshTokenUseCase, getDevicesUseCase, revokeDeviceUseCase, logoutUseCase, syncEmployeeUseCase, listUsersUseCase, updateUserUseCase };
+module.exports = { getEmployeeRolesUseCase, ALLOWED_ROLES, toSafeUser, clientPlatform, loginUseCase, getMeUseCase, changePasswordUseCase, forgotPasswordUseCase, resetPasswordByAdminUseCase, refreshTokenUseCase, getDevicesUseCase, revokeDeviceUseCase, logoutUseCase, syncEmployeeUseCase, listUsersUseCase, updateUserUseCase };

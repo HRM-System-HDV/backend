@@ -46,10 +46,13 @@ datasource db {
 // - Service chụp giờ từ template vào scheduledStart/scheduledEnd khi tạo ca,
 //   để sửa template không làm thay đổi lịch đã phân.
 // - Wi-Fi kiểm tra trước khi mở danh sách ca trong ngày trên Mobile, không theo thuộc tính ca.
-//   Shift không lưu branchId; phạm vi nhân sự lấy từ Organization.
+//   Shift chụp branchId khi phân ca và kiểm tra khớp hồ sơ Organization.
 // - Chống trùng áp dụng cả phân ca, chọn người làm thay và đổi ca: nhân viên đích đã có
 //   cùng workDate/templateId thì từ chối, không tạo đơn đổi/làm thay hoặc phân thêm ca đó.
 //   BE còn kiểm tra ca khác mẫu nhưng chồng giờ; unique không kiểm tra được khoảng giờ.
+// - Ca ĐÃ HỦY không tính vào chống trùng (cả ở tầng BE lẫn tầng DB): hủy ca xong vẫn
+//   được phân lại đúng ca mẫu đó trong ngày. Vì vậy UNIQUE của shifts là UNIQUE PARTIAL
+//   (WHERE "status" <> 'đã hủy'), xem migration 20261113120000_shift_partial_unique_cancelled.
 // CHECK/index tương ứng đã khai báo trong migration 20261112230000_hrm_uuid_redesign.
 
 // Khung ca mẫu — danh mục, có mã nghiệp vụ ST-SANG.
@@ -74,6 +77,7 @@ model Shift {
   id             String   @id @default(uuid(7)) @db.Uuid
   // employees.id của organization-service.
   employeeId     String   @db.Uuid
+  branchId       String?  @db.Uuid
   workDate       DateTime @db.Date
   // Khung ca áp dụng: shift_templates.id (trước đây lưu TÊN khung ca).
   templateId     String   @db.Uuid
@@ -81,7 +85,6 @@ model Shift {
   // nên giữ dạng chuỗi cho gọn; còn giờ vào/ra THỰC TẾ nằm ở attendances (DateTime).
   scheduledStart String
   scheduledEnd   String
-  note           String?
   // Vòng đời CỦA CHÍNH cái ca — hai trạng thái này KHÔNG suy ra được từ
   // attendances, nên phải lưu ở đây: "đang làm" | "đã hủy".
   // Cấm dùng cột này cho kết quả chấm công (present/late/missed) — kết quả
@@ -94,10 +97,16 @@ model Shift {
   template   ShiftTemplate @relation(fields: [templateId], references: [id], onDelete: Restrict)
   attendance Attendance?
 
-  @@unique([employeeId, workDate, templateId])
+  // KHÔNG dùng @@unique ở đây: ràng buộc chống trùng ca phải BỎ QUA ca đã hủy
+  // (hủy ca xong vẫn được phân lại đúng ca mẫu đó trong ngày). Prisma không biểu
+  // diễn được UNIQUE PARTIAL nên ràng buộc được tạo bằng migration
+  // 20261113120000_shift_partial_unique_cancelled:
+  //   CREATE UNIQUE INDEX ... ON "shifts" ("employeeId","workDate","templateId")
+  //   WHERE "status" <> 'đã hủy';
   @@index([employeeId])
   @@index([templateId])
   @@index([workDate])
+  @@index([branchId])
   @@map("shifts")
 }
 
@@ -167,7 +176,7 @@ model Task {
   assignedTo       String?   @db.Uuid
   // branches.id của organization-service.
   branchId         String?   @db.Uuid
-  dueDate          DateTime? @db.Date
+  dueDate          DateTime? @db.Timestamptz(3)
   status           String    @default("pending")
   // Task chung bắt buộc branchId + workDate + templateId, không gắn một Shift cá nhân.
   // Một người hoàn thành thì cập nhật chính task này; cả ca thấy chung trạng thái/ảnh.
@@ -197,11 +206,16 @@ model Task {
   @@map("tasks")
 }
 
-// Tối đa một dòng: migration có CHECK isSingleton = true kết hợp UNIQUE.
-// Service tạo cấu hình khi quản trị viên lưu; không tự sinh dữ liệu nghiệp vụ.
+// Một row mỗi chi nhánh + một row mặc định (branchId NULL).
+// Service tạo cấu hình khi admin/manager lưu; không tự sinh dữ liệu nghiệp vụ.
 model AttendanceConfig {
   id                        String        @id @default(uuid(7)) @db.Uuid
-  isSingleton               Boolean       @unique @default(true)
+  // NULL = cấu hình mặc định toàn hệ thống; khác NULL = cấu hình RIÊNG cho chi nhánh
+  // (branches.id của organization-service — DB tách nên không có FK).
+  // Thứ tự áp dụng: row theo chi nhánh -> row mặc định -> DEFAULT_CONFIG trong code.
+  // "Chỉ một row mặc định" do WorkService đảm bảo khi ghi; Postgres cho phép nhiều NULL
+  // trong index unique nên @@unique([branchId]) chỉ chặn trùng chi nhánh.
+  branchId                  String?       @db.Uuid
   // Mặc định không ân hạn: check-in muộn được phép nhưng áp dụng phạt phần trăm.
   gracePeriodMinutes        Int           @default(0)
   // Số phút tính từ giờ kết thúc ca được áp dụng từ ca mẫu.
@@ -223,6 +237,7 @@ model AttendanceConfig {
   doubleCheckinLateMinutes  Int           @default(0)
   requireReasonSwap         Boolean       @default(true)
 
+  @@unique([branchId])
   @@map("attendance_configs")
 }
 

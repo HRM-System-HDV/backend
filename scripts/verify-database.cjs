@@ -42,13 +42,19 @@ const checks = {
     await rejected(tx, () => tx.attendance.create({ data: attendance }));
     await rejected(tx, () => tx.task.create({ data: { title: "Missing assignment" } }));
     await tx.task.create({ data: { title: "Personal", assignedTo: data.employeeId } });
-    await tx.attendanceConfig.create({ data: {} });
+    // Bảng singleton có thể đã có sẵn 1 dòng mặc định (trạng thái DB hợp lệ).
+    if (!(await tx.attendanceConfig.findFirst())) await tx.attendanceConfig.create({ data: {} });
+    await rejected(tx, () => tx.attendanceConfig.create({ data: { isSingleton: true } }));
     await rejected(tx, () => tx.attendanceConfig.create({ data: { isSingleton: false } }));
     await rejected(tx, () => tx.attendanceConfig.updateMany({ data: { doubleCheckinLateMinutes: -1 } }));
   },
   async payroll(tx) {
-    const bank = await tx.bankAccount.create({ data: { accountNumber: "VERIFY-BANK", balance: "1000000", isPrimary: true } });
-    await rejected(tx, () => tx.bankAccount.create({ data: { accountNumber: "VERIFY-SECOND", isPrimary: true } }));
+    // DB có thể đã có sẵn 1 tài khoản chính (partial unique isPrimary).
+    if (!(await tx.bankAccount.findFirst({ where: { isPrimary: true } }))) {
+      await tx.bankAccount.create({ data: { accountNumber: "VERIFY-PRIMARY", balance: "0", isPrimary: true } });
+    }
+    await rejected(tx, () => tx.bankAccount.create({ data: { accountNumber: "VERIFY-SECOND-PRIMARY", isPrimary: true } }));
+    const bank = await tx.bankAccount.create({ data: { accountNumber: "VERIFY-BANK", balance: "1000000", isPrimary: false } });
     const payslip = await tx.payslip.create({ data: { employeeId: randomUUID(), month: "2026-01", baseSalary: "300000", bonus: "0", totalPenalty: "0", netSalary: "300000", salaryType: "monthly", salaryRate: "7800000" } });
     await rejected(tx, () => tx.payslip.update({ where: { id: payslip.id }, data: { status: "confirmed" } }));
     await tx.payslip.update({ where: { id: payslip.id }, data: { status: "confirmed", confirmedBy: randomUUID(), confirmedAt: new Date() } });
@@ -57,7 +63,9 @@ const checks = {
     await rejected(tx, () => tx.bankAccount.update({ where: { id: bank.id }, data: { balance: "-1" } }));
   },
   async integration(tx) {
-    await tx.soapGatewayConfig.create({ data: { endpointUrl: "https://example.test", wsdlUrl: "https://example.test/wsdl", serviceName: "Verification", securityMode: "none" } });
+    // Singleton: DB có thể đã có sẵn cấu hình; vẫn phải từ chối tạo dòng thứ hai/khi vi phạm CHECK.
+    if (!(await tx.soapGatewayConfig.findFirst())) await tx.soapGatewayConfig.create({ data: { endpointUrl: "https://example.test", wsdlUrl: "https://example.test/wsdl", serviceName: "Verification", securityMode: "none" } });
+    await rejected(tx, () => tx.soapGatewayConfig.create({ data: { isSingleton: true, endpointUrl: "https://example.test", wsdlUrl: "https://example.test/wsdl", serviceName: "Verification", securityMode: "none" } }));
     await rejected(tx, () => tx.soapGatewayConfig.create({ data: { isSingleton: false, endpointUrl: "https://example.test", wsdlUrl: "https://example.test/wsdl", serviceName: "Verification", securityMode: "none" } }));
     const data = { type: "advance", employeeId: randomUUID(), title: "Verification", content: "Verification" };
     await rejected(tx, () => tx.request.create({ data }));

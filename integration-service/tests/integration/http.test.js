@@ -29,3 +29,37 @@ test("Backlog chỉ credential nội bộ được ghi, admin được xem",asyn
   await request(app).post("/api/backlog").set("x-internal-token","http-test-secret").send(payload).expect(201);
   const result=await request(app).get("/api/backlog").set(headers).expect(200);assert.equal(result.body.data[0].action,payload.action);
 });
+
+test("regulation expiry dates round-trip and can be cleared; managers only mutate their branch", async () => {
+  const manager = { ...headers, "x-user-role": "manager", "x-branch-id": branchId };
+  const payload = { regulationCode: "EXPIRY-1", title: "Expiry", category: "Rules", summary: "Summary", content: "Content", effectiveDate: "13/11/2026", expiryDate: "30/11/2026", scopeBranchId: branchId };
+  const created = (await request(app).post("/api/regulations").set(manager).send(payload).expect(201)).body.data;
+  assert.equal(created.expiryDate, "30/11/2026");
+  const read = (await request(app).get(`/api/regulations/${created.id}`).set(manager).expect(200)).body.data;
+  assert.equal(read.expiryDate, "30/11/2026");
+  await request(app).put(`/api/regulations/${created.id}`).set(manager).send({ expiryDate: "12/11/2026" }).expect(400);
+  const cleared = (await request(app).put(`/api/regulations/${created.id}`).set(manager).send({ expiryDate: null }).expect(200)).body.data;
+  assert.equal(cleared.expiryDate, null);
+  const global = (await request(app).post("/api/regulations").set(headers).send({ ...payload, regulationCode: "GLOBAL-1", scopeBranchId: null }).expect(201)).body.data;
+  await request(app).get(`/api/regulations/${global.id}`).set(manager).expect(200);
+  await request(app).put(`/api/regulations/${global.id}`).set(manager).send({ title: "Denied" }).expect(403);
+  await request(app).put(`/api/regulations/${global.id}`).set(manager).send({ pinned: true }).expect(403);
+  await request(app).delete(`/api/regulations/${global.id}`).set(manager).expect(403);
+  await request(app).put(`/api/regulations/${global.id}`).set(headers).send({ pinned: true }).expect(200);
+});
+
+test("news allows urgent announcements without pinning and restricts company mutations to admin", async () => {
+  const manager = { ...headers, "x-user-role": "manager", "x-branch-id": branchId };
+  const payload = { title: "Urgent", summary: "Summary", content: "Content", publishDate: "13/11/2026", tag: "Khẩn cấp", pinned: false, branchId };
+  const own = (await request(app).post("/api/news").set(manager).send(payload).expect(201)).body.data;
+  assert.equal(own.pinned, false);
+  await request(app).put(`/api/news/${own.id}`).set(manager).send({ pinned: true }).expect(200);
+  const unpinned = (await request(app).put(`/api/news/${own.id}`).set(manager).send({ pinned: false }).expect(200)).body.data;
+  assert.equal(unpinned.pinned, false);
+  const company = (await request(app).post("/api/news").set(headers).send({ ...payload, branchId: null }).expect(201)).body.data;
+  await request(app).get(`/api/news/${company.id}`).set(manager).expect(200);
+  await request(app).put(`/api/news/${company.id}`).set(manager).send({ title: "Denied" }).expect(403);
+  await request(app).put(`/api/news/${company.id}`).set(manager).send({ pinned: true }).expect(403);
+  await request(app).delete(`/api/news/${company.id}`).set(manager).expect(403);
+  await request(app).put(`/api/news/${company.id}`).set(headers).send({ pinned: true }).expect(200);
+});

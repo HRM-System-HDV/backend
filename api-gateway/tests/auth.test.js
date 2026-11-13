@@ -8,9 +8,13 @@ process.env.JWT_SECRET = "test_gateway_secret_1234567890";
 const jwt = require("jsonwebtoken");
 const { createAuthMiddleware } = require("../src/middlewares/auth");
 
-function mockReq({ path = "/api/employees", method = "GET", token } = {}) {
+// `clientPlatform` ở đây là nền tảng của REQUEST hiện tại, tức giá trị mà
+// clientContext.js ghi vào req.clientPlatform trước auth. Truyền undefined =
+// req không có property này (để chứng minh middleware không nới cho case đó).
+function mockReq({ path = "/api/employees", method = "GET", token, clientPlatform } = {}) {
   const req = { path, method, headers: {}, cookies: {} };
   if (token) req.headers.authorization = `Bearer ${token}`;
+  if (clientPlatform !== undefined) req.clientPlatform = clientPlatform;
   return req;
 }
 
@@ -97,21 +101,70 @@ test("danh tính giữ riêng userId/employeeId và dùng branchId UUID", () => 
   assert.equal(req.user.branchSlug, undefined);
 });
 
-test("staff chỉ dùng token mobile qua Bearer, không dùng cookie web", () => {
+// Q-A-06: luật "nhân viên chỉ đăng nhập trên Mobile" phải xét theo nền tảng của
+// REQUEST HIỆN TẠI (req.clientPlatform do clientContext tính từ Origin/User-Agent),
+// không chỉ theo clientPlatform trong payload (giá trị ghi lúc CẤP token).
+// Nếu không, staff lấy token mobile hợp lệ rồi gọi API từ trình duyệt vẫn qua Gateway.
+function callStaff({ path, payloadPlatform, requestPlatform, useCookie }) {
   const middleware = createAuthMiddleware({ publicPaths: [] });
-  for (const clientPlatform of [undefined, "web", "mobile"]) {
-    const token = jwt.sign({ userId: "u-1", employeeId: "e-2", role: "staff", clientPlatform }, process.env.JWT_SECRET);
-    const req = mockReq({ token });
-    const res = mockRes();
-    let passed = false;
-    middleware(req, res, () => { passed = true; });
-    assert.equal(passed, clientPlatform === "mobile");
-    if (!passed) assert.equal(res.statusCode, 403);
-    const cookieReq = mockReq();
-    cookieReq.cookies["hrm-session"] = token;
-    const cookieRes = mockRes();
-    middleware(cookieReq, cookieRes, () => assert.fail("Staff không được dùng cookie web"));
-    assert.equal(cookieRes.statusCode, 403);
+  const token = jwt.sign(
+    { userId: "u-1", employeeId: "e-2", role: "staff", clientPlatform: payloadPlatform },
+    process.env.JWT_SECRET,
+  );
+  const req = mockReq({ path, token: useCookie ? undefined : token, clientPlatform: requestPlatform });
+  if (useCookie) req.cookies["hrm-session"] = token;
+  const res = mockRes();
+  let passed = false;
+  middleware(req, res, () => {
+    passed = true;
+  });
+  return { passed, res, req };
+}
+
+test("staff chỉ qua khi cả token lẫn request hiện tại là mobile (Q-A-06)", () => {
+  const cases = [
+    { name: "token mobile + request web (browser giả token mobile)", payloadPlatform: "mobile", requestPlatform: "web", expected: false },
+    { name: "token mobile + request web trên /api/payroll", payloadPlatform: "mobile", requestPlatform: "web", expected: false, path: "/api/payroll/payslips" },
+    { name: "token mobile + request KHÔNG có clientPlatform (không được mặc định là mobile)", payloadPlatform: "mobile", requestPlatform: undefined, expected: false },
+    { name: "token web + request mobile", payloadPlatform: "web", requestPlatform: "mobile", expected: false },
+    { name: "token thiếu clientPlatform + request mobile", payloadPlatform: undefined, requestPlatform: "mobile", expected: false },
+    { name: "token mobile + request mobile qua Bearer", payloadPlatform: "mobile", requestPlatform: "mobile", expected: true },
+  ];
+  for (const testCase of cases) {
+    const { passed, res, req } = callStaff(testCase);
+    assert.equal(passed, testCase.expected, testCase.name);
+    if (!testCase.expected) {
+      assert.equal(res.statusCode, 403, testCase.name);
+      assert.equal(res.body.error.code, "FORBIDDEN", testCase.name);
+    }
+  }
+  // Case duy nhất qua: danh tính vẫn giữ đúng nền tảng của token.
+  const ok = callStaff({ payloadPlatform: "mobile", requestPlatform: "mobile" });
+  assert.equal(ok.req.user.clientPlatform, "mobile");
+  assert.equal(ok.req.user.employeeId, "e-2");
+});
+
+test("staff dùng cookie phiên web luôn bị chặn, dù token payload là mobile", () => {
+  for (const requestPlatform of [undefined, "web", "mobile"]) {
+    const { passed, res } = callStaff({ payloadPlatform: "mobile", requestPlatform, useCookie: true });
+    assert.equal(passed, false, `cookie web, request=${requestPlatform}`);
+    assert.equal(res.statusCode, 403, `cookie web, request=${requestPlatform}`);
+  }
+});
+
+test("admin và manager không bị ràng buộc bởi nền tảng request", () => {
+  for (const role of ["admin", "manager"]) {
+    const middleware = createAuthMiddleware({ publicPaths: [] });
+    const token = jwt.sign({ userId: "u-1", role }, process.env.JWT_SECRET);
+    for (const requestPlatform of ["web", "mobile", undefined]) {
+      const req = mockReq({ token, clientPlatform: requestPlatform });
+      const res = mockRes();
+      let passed = false;
+      middleware(req, res, () => {
+        passed = true;
+      });
+      assert.equal(passed, true, `${role} trên ${requestPlatform}`);
+    }
   }
 });
 

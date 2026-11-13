@@ -36,4 +36,15 @@ class ForbiddenError extends Error {
   }
 }
 
-module.exports = { ValidationError, NotFoundError, DuplicateError, ForbiddenError };
+// 401 = request CHƯA xác thực; 403 (ForbiddenError) = đã xác thực nhưng thiếu quyền.
+// Chuẩn chung của dự án (docs/RULES.md §5.3).
+class UnauthorizedError extends Error {
+  constructor(message) {
+    super(message || "Vui lòng đăng nhập để tiếp tục");
+    this.name = "UnauthorizedError";
+    this.status = 401;
+    this.code = "UNAUTHORIZED";
+  }
+}
+
+module.exports = { ValidationError, NotFoundError, DuplicateError, ForbiddenError, UnauthorizedError };

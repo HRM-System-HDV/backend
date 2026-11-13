@@ -58,7 +58,7 @@ test("manager không đọc đơn chưa có chi nhánh; tiền tạm ứng tuân
 });
 test("đổi ca trùng lịch bị từ chối và chỉ nhân viên đích chấp nhận ở đúng chế độ",async()=>{
   const target={...employeeB,branchId:branchA};clients.employee=async id=>id===employeeA.id?employeeA:target;
-  const source={id:randomUUID(),employeeId:employeeA.id,workDate:"2099-01-01",templateId:randomUUID(),scheduledStart:"07:00",scheduledEnd:"12:00",status:"đang làm"};
+  const source={id:randomUUID(),employeeId:employeeA.id,workDate:"2099-01-01",templateId:randomUUID(),scheduledStart:"07:00",scheduledEnd:"12:00",status:"đang làm",attendance:null};
   clients.shift=async()=>source;clients.shifts=async()=>[{...source,id:randomUUID(),employeeId:target.id}];
   const body={type:"shift_swap",title:"Đổi ca",content:"Nhờ làm thay",sourceShiftId:source.id,targetEmployeeId:target.id};
   await assert.rejects(s.createRequest(body,staff),/đã có ca/);
@@ -73,6 +73,23 @@ test("Wi-Fi nội bộ lọc chi nhánh, chỉ admin được ghi",async()=>{
   assert.equal((await s.contentList("wifiConfig",{branchId:branchA},{internal:true}))[0].id,row.id);
   assert.equal((await s.contentList("wifiConfig",{branchId:branchB},{internal:true})).length,0);
   await assert.rejects(s.contentWrite("wifiConfig",row.id,{ssid:"Hacked"},manager),/admin/);
+});
+test("SOAP 0đ đi tới tầng Payroll, số âm vẫn bị từ chối (Q-E-04)",()=>{
+  const id=randomUUID();
+  const xml=`<Envelope><Body><PayoutRequest><idempotencyKey>k</idempotencyKey><debitAccount>123</debitAccount><totalAmount>0</totalAmount><payslipId>${id}</payslipId></PayoutRequest></Body></Envelope>`;
+  // PHIẾU 0đ là nghiệp vụ hợp lệ (REST/payroll đã cho chi để đóng phiếu, Q-D-02):
+  // parse KHÔNG được tự chặn, lỗi phải để Payroll quyết định.
+  const zero=soap.parsePayoutRequest(xml);
+  assert.equal(zero.error,undefined);
+  assert.equal(zero.data.totalAmount,"0");
+  // Số âm vẫn phải chặn ngay ở SOAP vì tài khoản ngân hàng không thể trừ âm.
+  const negative=soap.parsePayoutRequest(xml.replace("<totalAmount>0</totalAmount>","<totalAmount>-1000</totalAmount>"));
+  assert.ok(negative.error);assert.match(negative.error,/Tổng tiền chi không được âm/);
+  assert.equal(soap.parsePayoutRequest(xml.replace("<totalAmount>0</totalAmount>","<totalAmount>abc</totalAmount>")).error,"Tổng tiền chi không được âm");
+  // Hành vi cũ phải giữ nguyên: request không có PayoutRequest -> fault, không phải data.
+  const missing=soap.parsePayoutRequest("<Envelope><Body></Body></Envelope>");
+  assert.ok(missing.error);assert.match(missing.error,/thiếu PayoutRequest/);
+  assert.match(soap.buildSoapFault(missing.error),/<faultcode>soap:Client<\/faultcode>/);
 });
 test("Prisma viết đúng UUID, kiểu ngày, không còn slug/updatedAt/width",async()=>{
   const original=db.getPrisma;let created;

@@ -20,7 +20,13 @@ test("upload dùng publicId riêng, đọc đúng quyền và PDF quy định c�
   const read=(await request(app).get(`/api/regulations/${regulation.id}`).set(staff).expect(200)).body.data;
   assert.equal(read.files.length,1);assert.equal(read.files[0].mime,"application/pdf");
   assert.notEqual(read.files[0].id,read.files[0].publicId);
-  await request(app).get(`/api/files/${read.files[0].publicId}`).set(staff).expect(200);
+  const downloaded = await request(app).get(`/api/files/${read.files[0].publicId}`).set(staff).expect(200);
+  assert.match(downloaded.headers["content-type"], /application\/pdf/);
+  assert.equal(downloaded.body.toString(), "%PDF-1.4\nfile");
+  await request(app).get(`/api/files/${read.files[0].publicId}`).set({ ...staff, "x-branch-id": randomUUID() }).expect(403);
+  await request(app).delete(`/api/files/${read.files[0].publicId}`).set(admin).expect(200);
+  const afterDelete = (await request(app).get(`/api/regulations/${regulation.id}`).set(staff).expect(200)).body.data;
+  assert.equal(afterDelete.files.length, 0);
 });
 test("Prisma FileAsset ghi publicId, UUID và đúng tên cột",async()=>{
   const original=database.getPrisma;let data;

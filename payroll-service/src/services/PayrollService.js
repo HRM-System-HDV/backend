@@ -19,7 +19,7 @@ function clone(row) { return row && { ...row }; }
 async function listBankAccounts(actor) { requireAdmin(actor); const db = database.getPrisma(); return db ? db.bankAccount.findMany({ orderBy: { accountNumber: "asc" } }) : memory.accounts.map(clone); }
 function accountData(payload, create) {
   const data = {};
-  for (const key of ["accountName", "bankName"]) if (payload[key] !== undefined) data[key] = payload[key] === null ? null : String(payload[key]).trim();
+  for (const key of ["accountName", "bankName", "bankBranch"]) if (payload[key] !== undefined) data[key] = payload[key] === null ? null : String(payload[key]).trim();
   if (payload.branchId !== undefined) data.branchId = payload.branchId === null ? null : uuid(payload.branchId, "branchId");
   if (payload.isPrimary !== undefined) { if (typeof payload.isPrimary !== "boolean") throw new ValidationError("isPrimary phải là boolean"); data.isPrimary = payload.isPrimary; }
   if (create) {
@@ -35,7 +35,7 @@ async function createBankAccount(payload, actor) {
     try { return await db.$transaction(async tx => { if (data.isPrimary) await tx.bankAccount.updateMany({ data: { isPrimary: false } }); return tx.bankAccount.create({ data }); }, { isolationLevel: "Serializable" }); }
     catch (error) { if (error.code === "P2002") throw new DuplicateError("Số tài khoản đã tồn tại"); throw error; }
   }
-  return exclusive(() => { if (memory.accounts.some(a => a.accountNumber === data.accountNumber)) throw new DuplicateError("Số tài khoản đã tồn tại"); if (data.isPrimary) memory.accounts.forEach(a => { a.isPrimary = false; }); const row = { id: crypto.randomUUID(), branchId: null, accountName: null, bankName: null, ...data, createdAt: new Date() }; memory.accounts.push(row); return clone(row); });
+  return exclusive(() => { if (memory.accounts.some(a => a.accountNumber === data.accountNumber)) throw new DuplicateError("Số tài khoản đã tồn tại"); if (data.isPrimary) memory.accounts.forEach(a => { a.isPrimary = false; }); const row = { id: crypto.randomUUID(), branchId: null, accountName: null, bankName: null, bankBranch: null, ...data, createdAt: new Date() }; memory.accounts.push(row); return clone(row); });
 }
 async function updateBankAccount(id, payload, actor) {
   requireAdmin(actor); uuid(id); const data = accountData(payload, false); const db = database.getPrisma();
@@ -62,29 +62,47 @@ function calculateSalary(employee, records, bonus = 0) {
   }
   const rawSalary = employee.salaryType === "hourly" ? rate.times(milliseconds).div(3600000) : rate.times(count).div(employee.standardWorkDays);
   const baseSalary = rounded(rawSalary); const totalPenalty = rounded(sum(penalties)); const bonusAmount = money(bonus, "bonus");
-  return { salaryType: employee.salaryType, salaryRate: rate.toFixed(0), workedHours: employee.salaryType === "hourly" ? new Decimal(milliseconds).div(3600000).toFixed(2) : null, baseSalary, totalPenalty, bonus: bonusAmount, netSalary: new Decimal(baseSalary).plus(bonusAmount).minus(totalPenalty).toFixed(0), branchId: employee.branchId || null };
+  return { salaryType: employee.salaryType, salaryRate: rate.toFixed(0), workedHours: employee.salaryType === "hourly" ? new Decimal(milliseconds).div(3600000).toFixed(2) : null, workedShifts: count, baseSalary, totalPenalty, bonus: bonusAmount, netSalary: new Decimal(baseSalary).plus(bonusAmount).minus(totalPenalty).toFixed(0), branchId: employee.branchId || null };
 }
-async function computed(employeeId, period, bonus) {
+// Cache hồ sơ nhân sự theo employeeId trong phạm vi MỘT thao tác (một request).
+// Mục đích: không gọi lặp sang Organization khi một request cần nhiều phiếu của cùng nhân viên.
+function employeeCache() { return new Map(); }
+async function loadEmployee(employeeId, cache) {
+  if (cache && cache.has(employeeId)) return cache.get(employeeId);
   const employee = required(await OrgClient.getEmployeeById(employeeId), "Không tìm thấy nhân viên");
+  if (cache) cache.set(employeeId, employee);
+  return employee;
+}
+async function computed(employeeId, period, bonus, cache, penaltyOverride = null) {
+  const employee = await loadEmployee(employeeId, cache);
   const records = await WorkClient.getAttendance({ employeeId, month: period });
   if (!Array.isArray(records)) throw new ValidationError("Dữ liệu chấm công không hợp lệ");
-  return calculateSalary(employee, records, bonus);
+  const result = calculateSalary(employee, records, bonus);
+  if (penaltyOverride === null) return result;
+  const totalPenalty = money(penaltyOverride, "totalPenalty");
+  return { ...result, totalPenalty, netSalary: new Decimal(result.baseSalary).plus(result.bonus).minus(totalPenalty).toFixed(0) };
+}
+function payslipAdjustments(payload, current = {}) {
+  const penaltyOverride = payload.totalPenalty === undefined ? current.penaltyOverride ?? null
+    : payload.totalPenalty === null ? null : money(payload.totalPenalty, "totalPenalty");
+  let adjustmentReason = current.adjustmentReason ?? null;
+  if (payload.adjustmentReason !== undefined) {
+    if (payload.adjustmentReason !== null && (typeof payload.adjustmentReason !== "string" || payload.adjustmentReason.length > 2000)) throw new ValidationError("Lý do điều chỉnh phải là chuỗi tối đa 2000 ký tự");
+    adjustmentReason = payload.adjustmentReason?.trim() || null;
+  }
+  return { penaltyOverride, adjustmentReason };
 }
 async function rawPayslip(id) { const db = database.getPrisma(); return db ? db.payslip.findUnique({ where: { id } }) : clone(memory.payslips.find(p => p.id === id)); }
-async function refreshPending(row) {
-  if (row.status !== "pending_confirmation") return row;
-  const data = await computed(row.employeeId, row.month, row.bonus);
-  const db = database.getPrisma();
-  if (db) { await db.payslip.updateMany({ where: { id: row.id, status: "pending_confirmation", payoutId: null }, data }); return db.payslip.findUnique({ where: { id: row.id } }); }
-  return exclusive(() => { const current = required(memory.payslips.find(p => p.id === row.id), "Không tìm thấy phiếu lương"); if (current.status === "pending_confirmation") Object.assign(current, data); return clone(current); });
-}
+// Chỉ dùng ở luồng GHI (lập phiếu / điều chỉnh thưởng / xác nhận):
+// tính lại theo mức lương HIỆN TẠI của Organization rồi lưu bản chụp (BUSINESS.md §6.5).
+async function recomputePayslip(row, bonus, cache) { return computed(row.employeeId, row.month, bonus ?? row.bonus ?? 0, cache, row.penaltyOverride ?? null); }
+// Luồng ĐỌC: chỉ trả giá trị đã lưu — KHÔNG ghi DB và KHÔNG gọi N+1 sang Org/Work.
+// Nhờ vậy đọc phiếu lương vẫn trả 200 khi Organization/Work gián đoạn.
 async function getPayslip(id, actor) {
   uuid(id);
   const row = required(await rawPayslip(id), "Không tìm thấy phiếu lương");
   assertOwnPayslip(row, actor);
-  const refreshed = await refreshPending(row);
-  assertOwnPayslip(refreshed, actor);
-  return refreshed;
+  return row;
 }
 async function listPayslips(query, actor) {
   const scoped = scopePayslipQuery(query, actor); const where = {};
@@ -92,33 +110,42 @@ async function listPayslips(query, actor) {
   if (scoped.branchId) where.branchId = uuid(scoped.branchId, "branchId");
   if (scoped.month) where.month = month(scoped.month);
   const db = database.getPrisma(); const rows = db ? await db.payslip.findMany({ where, orderBy: { issuedAt: "desc" } }) : memory.payslips.filter(row => Object.entries(where).every(([key, value]) => row[key] === value)).map(clone);
-  const refreshed = await Promise.all(rows.map(refreshPending));
-  return refreshed.filter(row => {
+  return rows.filter(row => {
     try { assertOwnPayslip(row, actor); return true; } catch (error) { if (error.code === "FORBIDDEN") return false; throw error; }
   });
 }
 async function generatePayslipUseCase(payload, actor) {
   requireAdmin(actor); const employeeId = uuid(payload.employeeId, "employeeId"); const period = month(payload.month);
-  const data = await computed(employeeId, period, payload.bonus ?? 0); const db = database.getPrisma();
+  const adjustments = payslipAdjustments(payload);
+  const data = { ...await computed(employeeId, period, payload.bonus ?? 0, employeeCache(), adjustments.penaltyOverride), ...adjustments }; const db = database.getPrisma();
   const create = { employeeId, month: period, ...data, status: "pending_confirmation" };
   if (db) { try { return await db.payslip.create({ data: create }); } catch (error) { if (error.code === "P2002") throw new DuplicateError("Phiếu lương của nhân viên trong tháng đã tồn tại"); throw error; } }
   return exclusive(() => { if (memory.payslips.some(p => p.employeeId === employeeId && p.month === period)) throw new DuplicateError("Phiếu lương của nhân viên trong tháng đã tồn tại"); const row = { id: crypto.randomUUID(), ...create, payoutId: null, confirmedBy: null, confirmedAt: null, issuedAt: new Date() }; memory.payslips.push(row); return clone(row); });
 }
 async function updatePayslip(id, payload, actor) {
-  requireAdmin(actor); if (Object.keys(payload).some(k => k !== "bonus")) throw new ValidationError("Chỉ được điều chỉnh thưởng trên phiếu chưa xác nhận");
-  const current = await getPayslip(id, actor); if (current.status !== "pending_confirmation") throw new DuplicateError("Phiếu đã xác nhận, không được sửa");
-  const data = await computed(current.employeeId, current.month, payload.bonus ?? current.bonus); const db = database.getPrisma();
+  uuid(id, "id");
+  requireAdmin(actor);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload) || Object.keys(payload).some(k => !["bonus", "totalPenalty", "adjustmentReason"].includes(k))) throw new ValidationError("Chỉ được điều chỉnh thưởng, phạt và lý do trên phiếu chưa xác nhận");
+  const current = required(await rawPayslip(id), "Không tìm thấy phiếu lương"); assertOwnPayslip(current, actor);
+  if (current.status !== "pending_confirmation") throw new DuplicateError("Phiếu đã xác nhận, không được sửa");
+  const adjustments = payslipAdjustments(payload, current);
+  const data = { ...await computed(current.employeeId, current.month, payload.bonus ?? current.bonus, employeeCache(), adjustments.penaltyOverride), ...adjustments }; const db = database.getPrisma();
   if (db) { const updated = await db.payslip.updateMany({ where: { id, status: "pending_confirmation", payoutId: null }, data }); if (updated.count !== 1) throw new DuplicateError("Phiếu đã được xác nhận"); return db.payslip.findUnique({ where: { id } }); }
   return exclusive(() => { const row = required(memory.payslips.find(p => p.id === id), "Không tìm thấy phiếu"); if (row.status !== "pending_confirmation") throw new DuplicateError("Phiếu đã xác nhận"); Object.assign(row, data); return clone(row); });
 }
 async function confirmPayslip(id, actor) {
+  uuid(id, "id");
   if (!actor?.userId) throw new ForbiddenError("Thiếu danh tính xác nhận");
-  const current = await getPayslip(id, actor);
+  const current = required(await rawPayslip(id), "Không tìm thấy phiếu lương"); assertOwnPayslip(current, actor);
   if (current.status === "confirmed") return current;
   if (current.status !== "pending_confirmation") throw new DuplicateError("Phiếu đã thanh toán");
-  const data = { status: "confirmed", confirmedBy: actor.userId, confirmedAt: new Date() }; const db = database.getPrisma();
-  if (db) { const updated = await db.payslip.updateMany({ where: { id, status: "pending_confirmation", payoutId: null }, data }); if (updated.count !== 1) throw new DuplicateError("Phiếu vừa được xử lý, hãy tải lại"); return db.payslip.findUnique({ where: { id } }); }
-  return exclusive(() => { const row = memory.payslips.find(p => p.id === id); if (row.status !== "pending_confirmation") throw new DuplicateError("Phiếu vừa được xử lý"); Object.assign(row, data); return clone(row); });
+  // Tính lại theo mức lương hiện tại rồi CHỤP bản chụp ngay lúc xác nhận:
+  // phần chưa xác nhận luôn theo mức lương mới (BUSINESS.md §6.5),
+  // phiếu đã xác nhận thì giữ nguyên bản chụp, không tự đổi theo hồ sơ mới.
+  const data = await recomputePayslip(current, current.bonus, employeeCache());
+  const patch = { ...data, status: "confirmed", confirmedBy: actor.userId, confirmedAt: new Date() }; const db = database.getPrisma();
+  if (db) { const updated = await db.payslip.updateMany({ where: { id, status: "pending_confirmation", payoutId: null }, data: patch }); if (updated.count !== 1) throw new DuplicateError("Phiếu vừa được xử lý, hãy tải lại"); return db.payslip.findUnique({ where: { id } }); }
+  return exclusive(() => { const row = required(memory.payslips.find(p => p.id === id), "Không tìm thấy phiếu"); if (row.status !== "pending_confirmation") throw new DuplicateError("Phiếu vừa được xử lý"); Object.assign(row, patch); return clone(row); });
 }
 async function setPayslipStatus(id, status, actor) { if (status !== "confirmed") throw new ValidationError("Chỉ được xác nhận phiếu; trạng thái paid do lệnh chi thành công cập nhật"); return confirmPayslip(id, actor); }
 const payoutInclude = { payslips: { select: { id: true } } };
@@ -139,7 +166,10 @@ function duplicateResult(row, input) {
 }
 function payoutTotals(rows, input) {
   if (rows.length !== input.ids.length || rows.some(p => p.status !== "confirmed" || p.payoutId || !p.confirmedBy || !p.confirmedAt)) throw new ValidationError("Chỉ chi các phiếu đã xác nhận và chưa thanh toán");
-  if (rows.some(p => new Decimal(p.netSalary).lte(0))) throw new ValidationError("Phiếu được chi phải có thực lĩnh lớn hơn 0");
+  // BUSINESS.md §8.1 chỉ có luồng Chưa xác nhận → Đã xác nhận → Đã thanh toán, không có bước "hủy chi".
+  // Vì vậy phiếu có thực lĩnh bằng 0 vẫn được chi để ĐÓNG trạng thái (không trừ tiền),
+  // còn thực lĩnh âm thì không thể chi (số dư không thể âm).
+  if (rows.some(p => new Decimal(p.netSalary).lt(0))) throw new ValidationError("Phiếu được chi không được có thực lĩnh âm");
   const total = sum(rows.map(p => p.netSalary)).toFixed(0); const count = new Set(rows.map(p => p.employeeId)).size;
   if ((input.totalAmount !== undefined && !new Decimal(total).eq(money(input.totalAmount, "totalAmount"))) || (input.beneficiaryCount !== undefined && Number(input.beneficiaryCount) !== count)) throw new ValidationError("Tổng tiền hoặc số người hưởng không khớp các phiếu đã chọn");
   return { totalAmount: total, beneficiaryCount: count };

@@ -1,5 +1,9 @@
 // Prisma schema — integration-service (Port 4005)
-// Database hrm_integration trên Supabase Postgres riêng (single-tenant, không tenantId).
+// Database hrm_integration: Postgres RIÊNG của service này (single-tenant, không tenantId).
+//   - Môi trường local: container Postgres riêng do docker compose dựng ở cổng 5437
+//     (xem DATABASE_URL trong .env: postgresql://...@localhost:5437/hrm_integration).
+//   - Triển khai production: trỏ DATABASE_URL sang Postgres/Supabase riêng của service;
+//     không dùng chung link với service khác (docs/RULES.md §6).
 //
 // Quy tắc định danh (chốt 12/11/2026):
 //  - id: UUID (uuid(7)) cho mọi khóa chính và khóa ngoại.
@@ -125,8 +129,10 @@ model NotificationSetting {
   @@map("notification_settings")
 }
 
-// Tối đa một dòng: migration có CHECK isSingleton = true kết hợp UNIQUE.
-// Hiện UNIQUE Boolean chỉ giới hạn tối đa hai dòng. Seed tạo cấu hình sau.
+// Tối đa một dòng: migration 20261112230000_hrm_uuid_redesign tạo UNIQUE(isSingleton)
+// kết hợp CHECK (isSingleton = true) — nên chỉ tồn tại DUY NHẤT một dòng cấu hình
+// (dòng thứ hai, kể cả isSingleton = false, đều bị CHECK chặn).
+// Service tạo cấu hình khi quản trị viên lưu; không tự sinh dữ liệu nghiệp vụ.
 model SoapGatewayConfig {
   id              String    @id @default(uuid(7)) @db.Uuid
   isSingleton     Boolean   @unique @default(true)

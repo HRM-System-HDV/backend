@@ -10,6 +10,35 @@ const fields = {
 };
 const dateFields = ["birthDate","issueDate","resignedAt","joinDate"];
 function isDate(value) { return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString().slice(0,10) === value; }
+// Ngày hôm nay theo múi giờ máy chủ, dạng YYYY-MM-DD.
+function todayString() { const now = new Date(); return new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0,10); }
+function toDateString(value) { if (value instanceof Date) return value.toISOString().slice(0,10); if (typeof value === "string") return value; return null; }
+function trimmed(value) { return value === undefined || value === null ? "" : String(value).trim(); }
+// Quản lý CCCD (BUSINESS.md §3.2): số CCCD, ngày cấp, nơi cấp, ảnh trước, ảnh sau.
+// - Số CCCD đúng 12 chữ số.
+// - Ngày cấp là ngày hợp lệ và không sau ngày hiện tại.
+// - Nếu có bất kỳ trường nào trong bộ (số, ngày cấp, nơi cấp) thì phải đủ cả ba.
+// - Ảnh trước/sau là tùy chọn nhưng phải là đường dẫn hợp lệ khi có.
+function validateCccd(row) {
+  const cccd = trimmed(row.cccd);
+  const issueDate = toDateString(row.issueDate);
+  const issuePlace = trimmed(row.issuePlace);
+  if (cccd && !/^\d{12}$/.test(cccd)) throw new ValidationError("Số CCCD phải gồm đúng 12 chữ số");
+  if (issueDate) {
+    if (!isDate(issueDate)) throw new ValidationError("Ngày cấp CCCD phải là ngày YYYY-MM-DD hợp lệ");
+    if (issueDate > todayString()) throw new ValidationError("Ngày cấp CCCD không được sau ngày hiện tại");
+  }
+  const filled = [cccd, issueDate, issuePlace].filter(Boolean).length;
+  if (filled > 0 && filled < 3) throw new ValidationError("Quản lý CCCD cần đủ số CCCD, ngày cấp và nơi cấp");
+  for (const key of ["cccdFront","cccdBack"]) {
+    const value = row[key];
+    if (value === undefined || value === null || value === "") continue;
+    const path = trimmed(value);
+    const isUrl = /^https?:\/\/\S+$/i.test(path);
+    const isPath = /^\/?[^\s/][^\s]*$/.test(path);
+    if (!isUrl && !isPath) throw new ValidationError(`${key} phải là đường dẫn ảnh hợp lệ`);
+  }
+}
 function normalize(kind, body, partial = false) {
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new ValidationError("Dữ liệu phải là một đối tượng");
   const out = {};
@@ -35,9 +64,13 @@ function normalize(kind, body, partial = false) {
   for (const code of ["departmentCode", "positionCode"]) if (out[code] !== undefined && !out[code]) throw new ValidationError("Mã nghiệp vụ không được để trống");
   if (out.name !== undefined && !out.name) throw new ValidationError("Tên không được để trống");
   if (out.status !== undefined && !out.status) throw new ValidationError("Trạng thái không được để trống");
+  if (kind === "branch" && out.address !== undefined && (typeof out.address !== "string" || !out.address)) throw new ValidationError("Địa chỉ chi nhánh không được để trống");
+  if (kind === "branch" && out.status !== undefined && !["hoạt động", "vô hiệu hóa"].includes(out.status)) throw new ValidationError("Trạng thái chi nhánh phải là hoạt động hoặc vô hiệu hóa");
+  if (kind === "department" && out.status !== undefined && !["hoạt động", "tạm dừng"].includes(out.status)) throw new ValidationError("Trạng thái phòng ban phải là hoạt động hoặc tạm dừng");
+  if (kind === "position" && out.status !== undefined && !["hoạt động", "tạm dừng"].includes(out.status)) throw new ValidationError("Trạng thái vị trí phải là hoạt động hoặc tạm dừng");
   if (out.salaryType !== undefined && !["monthly","hourly"].includes(out.salaryType)) throw new ValidationError("Kiểu lương phải là monthly hoặc hourly");
   if (!partial) {
-    const required = kind === "employee" ? ["name","email","salaryType","salary"] : kind === "department" ? ["name","departmentCode"] : kind === "position" ? ["name","positionCode"] : ["name"];
+    const required = kind === "employee" ? ["name","email","salaryType","salary"] : kind === "department" ? ["name","departmentCode"] : kind === "position" ? ["name","positionCode"] : ["name","address"];
     for (const key of required) if (out[key] === undefined || out[key] === null || out[key] === "") throw new ValidationError(`Thiếu trường bắt buộc: ${key}`);
   }
   return out;
@@ -48,4 +81,4 @@ function validateEmployeeRules(row) {
   if (row.joinDate && row.resignedAt && new Date(row.resignedAt) < new Date(row.joinDate)) throw new ValidationError("Ngày nghỉ việc không được trước ngày vào làm");
 }
 function validateId(id) { if (!UUID.test(id || "")) throw new ValidationError("ID phải là UUID hợp lệ"); }
-module.exports = { normalize, validateEmployeeRules, validateId, dateFields };
+module.exports = { normalize, validateEmployeeRules, validateCccd, validateId, dateFields };

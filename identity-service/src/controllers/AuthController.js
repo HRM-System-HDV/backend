@@ -55,17 +55,22 @@ async function login(req, res, next) {
     const errors = validateLogin(req.body);
     if (errors.length) throw new ValidationError(errors.join("; "));
     const result = await loginUseCase(req.body, req);
-    if (result.clientPlatform === "web") {
+    const isWeb = result.clientPlatform === "web";
+    if (isWeb) {
       res.cookie(COOKIE_NAME, result.accessToken, cookieOptions(ACCESS_COOKIE_MAX_AGE_MS));
       res.cookie(REFRESH_COOKIE_NAME, result.refreshToken, cookieOptions(REFRESH_COOKIE_MAX_AGE_MS));
     }
+    // Web: refresh token chỉ nằm trong cookie httpOnly, KHÔNG trả trong body
+    // (body đọc được bằng JS nên dễ bị lộ qua XSS hoặc log của proxy).
+    // Mobile: lưu trong Keychain/Keystore nên vẫn trả refresh token trong body.
+    const data = {
+      user: result.user,
+      accessToken: result.accessToken,
+      deviceSessionId: result.deviceSessionId,
+    };
+    if (!isWeb) data.refreshToken = result.refreshToken;
     return res.status(200).json({
-      data: {
-        user: result.user,
-        accessToken: result.accessToken,
-        refreshToken: result.refreshToken,
-        deviceSessionId: result.deviceSessionId,
-      },
+      data,
       message: "Đăng nhập thành công",
     });
   } catch (e) {
@@ -146,17 +151,23 @@ async function resetPassword(req, res, next) {
 
 async function refresh(req, res, next) {
   try {
-    const refreshToken =
-      req.body?.refreshToken || req.headers["x-refresh-token"] || req.cookies?.[REFRESH_COOKIE_NAME];
+    // Refresh token chỉ nhận từ body (mobile) hoặc cookie httpOnly (web).
+    // KHÔNG nhận qua header `x-refresh-token`: header bị ghi vào log của proxy,
+    // access log và gateway -> rò rỉ token ra ngoài.
+    const refreshToken = req.body?.refreshToken || req.cookies?.[REFRESH_COOKIE_NAME];
     const result = await refreshTokenUseCase({ refreshToken, clientPlatform: req.body?.clientPlatform }, req);
-    if (result.clientPlatform === "web") res.cookie(COOKIE_NAME, result.accessToken, cookieOptions(ACCESS_COOKIE_MAX_AGE_MS));
+    const isWeb = result.clientPlatform === "web";
+    if (isWeb) res.cookie(COOKIE_NAME, result.accessToken, cookieOptions(ACCESS_COOKIE_MAX_AGE_MS));
     // refreshTokenUseCase xoay vòng token cũ -> phải ghi đè cookie, nếu không lần
     // sau client trình bày đúng token đã bị thu hồi và phiên chết hẳn.
-    if (result.refreshToken && result.clientPlatform === "web") {
+    if (result.refreshToken && isWeb) {
       res.cookie(REFRESH_COOKIE_NAME, result.refreshToken, cookieOptions(REFRESH_COOKIE_MAX_AGE_MS));
     }
+    // Web không nhận refresh token trong body (chỉ cookie httpOnly); mobile thì có.
+    const data = { ...result };
+    if (isWeb) delete data.refreshToken;
     return res.status(200).json({
-      data: result,
+      data,
       message: "Cấp lại token thành công",
     });
   } catch (e) {
@@ -193,6 +204,13 @@ async function syncEmployee(req, res, next) {
 }
 
 module.exports = {
+  getUserName: async (req, res, next) => {
+    try {
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id)) throw new ValidationError("ID phải là UUID");
+      const user = await getMeUseCase(req.params.id);
+      res.json({ data: { id: user.id, name: user.name } });
+    } catch (error) { next(error); }
+  },
   listUsers: async (req, res, next) => { try { res.json({ data: await listUsersUseCase(req.user) }); } catch (error) { next(error); } },
   updateUser: async (req, res, next) => { try { res.json({ data: await updateUserUseCase(req.params.id, req.body || {}, req.user) }); } catch (error) { next(error); } },
   login,

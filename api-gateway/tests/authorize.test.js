@@ -15,6 +15,16 @@ function mockRes() {
     res.body = body;
     return res;
   };
+  // Tuyến SOAP trả lỗi dạng XML nên mock phải có set/send.
+  res.set = (name, value) => {
+    res.headers = res.headers || {};
+    res.headers[name] = value;
+    return res;
+  };
+  res.send = (body) => {
+    res.text = body;
+    return res;
+  };
   return res;
 }
 
@@ -33,7 +43,7 @@ function run(method, path, role) {
 // [method, path, role, mong đợi cho qua]
 const cases = [
   ["POST", "/api/notifications/reminders", "staff", true],
-  ["GET", "/api/attendance/config", "manager", false],
+  ["GET", "/api/attendance/config", "manager", true],
   ["GET", "/api/attendance/config", "admin", true],
   ["PUT", "/api/attendance/s1", "staff", false],
   ["PUT", "/api/attendance/s1", "manager", true],
@@ -45,6 +55,11 @@ const cases = [
   ["PUT", "/api/auth/users/u1", "manager", false],
   ["PUT", "/api/auth/users/u1", "admin", true],
   ["POST", "/api/positions", "staff", false],
+  // Vị trí là danh mục admin-only, khớp assertAdmin của organization-service.
+  ["POST", "/api/positions", "manager", false],
+  ["DELETE", "/api/positions/p1", "manager", false],
+  ["DELETE", "/api/positions/p1", "admin", true],
+  ["GET", "/api/positions", "staff", true],
   // Hồ sơ nhân sự: nhân viên chỉ được sửa chính mình / xin thôi việc.
   ["POST", "/api/employees", "staff", false],
   ["POST", "/api/employees", "manager", true],
@@ -53,10 +68,13 @@ const cases = [
   ["DELETE", "/api/employees/e-1", "staff", false],
   ["DELETE", "/api/employees/e-1", "admin", true],
 
-  // Quản lý chi nhánh là tính năng hệ thống (chỉ admin gán chi nhánh cho manager).
+  // Gateway cho Manager/Admin ghi chi nhánh; Org kiểm tra phạm vi branchId.
   // Phòng ban vẫn là nghiệp vụ vận hành chi nhánh nên manager ghi được.
   ["POST", "/api/branches", "staff", false],
-  ["PUT", "/api/branches/CN01", "manager", false],
+  ["POST", "/api/branches", "manager", true],
+  ["POST", "/api/auth/internal/employee-roles", "admin", false],
+  ["GET", "/api/auth/internal/users/u1/name", "manager", false],
+  ["PUT", "/api/branches/CN01", "manager", true],
   ["PUT", "/api/branches/CN01", "admin", true],
   ["DELETE", "/api/departments/d1", "staff", false],
   ["POST", "/api/departments", "manager", true],
@@ -70,14 +88,12 @@ const cases = [
   ["POST", "/api/shifts/register", "staff", true],
   ["POST", "/api/shifts/unregister", "staff", true],
   ["DELETE", "/api/shifts/registrations/r1", "staff", true],
-  // Luật khung ca phải đứng trước luật /api/shifts/:id chung.
-  ["POST", "/api/shifts/templates", "staff", false],
-  ["PUT", "/api/shifts/templates/t1", "staff", false],
   ["POST", "/api/shift-templates", "staff", false],
   ["PUT", "/api/shift-templates/t1", "admin", true],
 
   ["PUT", "/api/attendance/config", "staff", false],
-  ["PUT", "/api/attendance/config", "manager", false],
+  ["PUT", "/api/attendance/config", "manager", true],
+  ["GET", "/api/attendance/config", "staff", true],
   ["POST", "/api/attendance/checkin", "staff", true],
   ["POST", "/api/attendance/checkout", "staff", true],
 
@@ -104,10 +120,6 @@ const cases = [
   ["POST", "/api/wifi-configs", "staff", false],
   ["POST", "/api/wifi-configs", "manager", false],
   ["PUT", "/api/wifi-configs/w1", "admin", true],
-  // Quét Wi-Fi trên máy chủ chạy lệnh hệ điều hành nên chỉ admin được gọi.
-  ["GET", "/api/wifi-configs/scan", "staff", false],
-  ["GET", "/api/wifi-configs/scan", "manager", false],
-  ["GET", "/api/wifi-configs/scan", "admin", true],
   // Gửi thông báo là thao tác quản lý: staff bị chặn, manager/admin được.
   ["POST", "/api/notifications", "staff", false],
   ["POST", "/api/notifications", "manager", true],
@@ -173,7 +185,13 @@ for (const [method, path, role, allowed] of cases) {
     assert.equal(passed, allowed);
     if (!allowed) {
       assert.equal(res.statusCode, 403);
-      assert.equal(res.body.error.code, "FORBIDDEN");
+      // Tuyến SOAP trả lỗi dạng XML soap:Fault, tuyến khác trả envelope JSON.
+      if (path.startsWith("/soap/")) {
+        assert.match(res.text, /<soap:Fault>/);
+        assert.match(res.text, /<faultcode>soap:Client<\/faultcode>/);
+      } else {
+        assert.equal(res.body.error.code, "FORBIDDEN");
+      }
     }
   });
 }

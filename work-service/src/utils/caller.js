@@ -1,7 +1,7 @@
 "use strict";
 const { timingSafeEqual } = require("node:crypto");
 const config = require("../config");
-const { ForbiddenError } = require("./errors");
+const { UnauthorizedError } = require("./errors");
 function callerFrom(req) {
   let name = req.headers["x-user-name"] || "Người dùng";
   try { name = decodeURIComponent(name); } catch {}
@@ -13,10 +13,11 @@ function callerFrom(req) {
     name, internal };
 }
 function requireCaller(caller) {
+  // Chưa xác thực (vô danh / token sai) => 401 UNAUTHORIZED.
+  // Đã xác thực nhưng thiếu quyền => 403 FORBIDDEN (do nơi gọi ném ForbiddenError).
   if (!caller || (!caller.internal && (!caller.userId || !["admin", "manager", "staff"].includes(caller.role)))) {
-    throw new ForbiddenError("Không xác định được danh tính đã xác thực");
+    throw new UnauthorizedError("Chưa xác thực, vui lòng đăng nhập để tiếp tục");
   }
 }
 function isPrivileged(caller) { return caller?.role === "admin" || caller?.role === "manager"; }
-function assertAdmin(caller) { requireCaller(caller); if (caller.internal || caller.role !== "admin") throw new ForbiddenError("Chỉ quản trị viên được thay đổi cấu hình hệ thống"); }
-module.exports = { callerFrom, requireCaller, isPrivileged, assertAdmin };
+module.exports = { callerFrom, requireCaller, isPrivileged };

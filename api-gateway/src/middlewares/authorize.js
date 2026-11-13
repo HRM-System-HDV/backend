@@ -2,6 +2,7 @@
 
 // Phân quyền tại gateway: dịch vụ phía sau nhận danh tính qua header x-user-*
 // nên kiểm tra vai trò tại gateway và phạm vi bản ghi tại service nghiệp vụ.
+const { sendError } = require("../utils/soapFault");
 const WRITE = ["POST", "PUT", "PATCH", "DELETE"];
 const MANAGERS = ["admin", "manager"];
 const ALL = ["admin", "manager", "staff"];
@@ -9,6 +10,7 @@ const ALL = ["admin", "manager", "staff"];
 // Xét theo thứ tự, luật khớp đầu tiên thắng. `roles: []` = cấm mọi request từ
 // bên ngoài, chỉ service nội bộ gọi thẳng mới được.
 const rules = [
+  { methods: ["GET", ...WRITE], path: /^\/api\/auth\/internal(\/|$)/, roles: [] },
   { methods: ["POST"], path: /^\/api\/auth\/sync-employee$/, roles: [] },
   { methods: WRITE, path: /^\/api\/auth\/users(\/|$)/, roles: ["admin"] },
   { methods: ["GET"], path: /^\/api\/auth\/users(\/|$)/, roles: ["admin"] },
@@ -19,14 +21,18 @@ const rules = [
   // và chặn các trường nhạy cảm (vai trò, lương, chi nhánh).
   { methods: ["PUT"], path: /^\/api\/employees\/[^/]+$/, roles: ALL },
   { methods: WRITE, path: /^\/api\/employees(\/|$)/, roles: MANAGERS },
-  // Quản lý chi nhánh là tính năng hệ thống: admin gán chi nhánh cho manager,
-  // manager không bao giờ tự chuyển. Phòng ban vẫn là nghiệp vụ vận hành chi nhánh.
-  { methods: WRITE, path: /^\/api\/branches(\/|$)/, roles: ["admin"] },
+  // Manager/Admin ghi chi nhánh; organization-service kiểm tra phạm vi branchId.
+  { methods: WRITE, path: /^\/api\/branches(\/|$)/, roles: MANAGERS },
   { methods: WRITE, path: /^\/api\/departments(\/|$)/, roles: MANAGERS },
-  { methods: WRITE, path: /^\/api\/positions(\/|$)/, roles: MANAGERS },
+  // Danh mục vị trí là admin-only: organization-service chặn bằng assertAdmin,
+  // nên gateway cũng phải chặn ở đây — để MANAGERS thì manager lọt qua gateway rồi
+  // nhận 403 từ service (xem tests/integration/org.test.js của organization).
+  { methods: WRITE, path: /^\/api\/positions(\/|$)/, roles: ["admin"] },
   { methods: WRITE, path: /^\/api\/shift-templates(\/|$)/, roles: MANAGERS },
-  { methods: WRITE, path: /^\/api\/shifts\/templates(\/|$)/, roles: MANAGERS },
-  { methods: ["GET", ...WRITE], path: /^\/api\/attendance\/config$/, roles: ["admin"] },
+  // Cấu hình chấm công theo chi nhánh: đọc cho mọi vai trò (service giới hạn đúng
+  // chi nhánh của mình), ghi chỉ admin/manager; manager chỉ sửa chi nhánh của mình.
+  { methods: ["GET"], path: /^\/api\/attendance\/config$/, roles: ALL },
+  { methods: WRITE, path: /^\/api\/attendance\/config$/, roles: MANAGERS },
   { methods: ["PUT", "PATCH", "DELETE"], path: /^\/api\/attendance\/[^/]+$/, roles: MANAGERS },
   { methods: ["POST"], path: /^\/api\/shifts$/, roles: MANAGERS },
   { methods: ["POST"], path: /^\/api\/shifts\/[^/]+\/assign$/, roles: MANAGERS },
@@ -39,8 +45,6 @@ const rules = [
   // cấu hình Wi-Fi và cấu hình SOAP là tính năng hệ thống, chỉ admin.
   { methods: WRITE, path: /^\/api\/(news|regulations)(\/|$)/, roles: MANAGERS },
   { methods: WRITE, path: /^\/api\/(wifi-configs|soap-config)(\/|$)/, roles: ["admin"] },
-  // Quét Wi-Fi trên máy chủ chạy lệnh hệ điều hành: chỉ admin.
-  { methods: ["GET"], path: /^\/api\/wifi-configs\/scan$/, roles: ["admin"] },
   // Gửi thông báo là thao tác quản lý: nhân viên không tự bắn thông báo cho
   // người khác (và không mạo được tên người gửi).
   { methods: ["POST"], path: /^\/api\/notifications\/reminders$/, roles: ALL },
@@ -74,14 +78,15 @@ function createAuthorizeMiddleware(options = {}) {
     if (!rule) return next();
     const role = req.user && req.user.role;
     if (role && rule.roles.includes(role)) return next();
-    return res.status(403).json({
-      error: {
-        code: "FORBIDDEN",
-        message: rule.roles.length
-          ? "Bạn không có quyền thực hiện thao tác này"
-          : "Tuyến này chỉ dành cho gọi nội bộ giữa các service",
-      },
-    });
+    return sendError(
+      req,
+      res,
+      403,
+      "FORBIDDEN",
+      rule.roles.length
+        ? "Bạn không có quyền thực hiện thao tác này"
+        : "Tuyến này chỉ dành cho gọi nội bộ giữa các service",
+    );
   };
 }
 

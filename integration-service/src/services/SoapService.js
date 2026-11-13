@@ -47,8 +47,8 @@ function parsePayoutRequest(xml) {
   if (!payslipIds.length || payslipIds.some(id=>!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) return {error:"Cần danh sách payslipId UUID đã xác nhận"};
   if (missing.length) return { error: `Thiếu trường bắt buộc: ${missing.join(", ")}` };
   const totalAmount = Number(totalAmountRaw);
-  if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
-    return { error: "Tổng tiền chi phải lớn hơn 0" };
+  if (!Number.isFinite(totalAmount) || totalAmount < 0) {
+    return { error: "Tổng tiền chi không được âm" };
   }
   return {
     data: {

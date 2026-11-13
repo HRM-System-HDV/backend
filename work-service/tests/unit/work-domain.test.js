@@ -7,6 +7,7 @@ const service = require("../../src/services/WorkService");
 const db = require("../../src/config/database");
 const org = require("../../src/clients/OrgClient");
 const integration = require("../../src/clients/IntegrationClient");
+const identity = require("../../src/clients/IdentityClient");
 const clock = require("../../src/utils/time");
 const admin = { userId: randomUUID(), role: "admin", name: "Quản trị" };
 let people;
@@ -18,6 +19,7 @@ beforeEach((t) => {
   t.mock.method(integration, "getWifiConfigs", async (branchId) => [{ branchId, status: "hoạt động", bssid: "aa:bb:cc:dd:ee:ff", ssid: "HRM" }]);
   t.mock.method(integration, "writeBacklog", async () => ({ ok: true }));
   t.mock.method(integration, "deleteFileByUrl", async () => {});
+  t.mock.method(identity, "getUserName", async (id) => ({ id, name: "Người nộp ảnh" }));
 });
 function employee(overrides = {}) {
   const e = { id: randomUUID(), branchId: randomUUID(), name: "Nhân viên", salaryType: "hourly", salary: "30000", ...overrides };
@@ -30,7 +32,7 @@ async function fixture(t, opts = {}) {
   t.mock.method(Date, "now", () => instant);
   const e = employee(opts.employee);
   const template = await service.createTemplate({ templateCode: randomUUID(), name: "Ca", startTime: opts.start || "07:00", endTime: opts.end || "12:00" }, admin);
-  const shift = await service.createShift({ employeeId: e.id, templateId: template.id, workDate: "2026-11-12" }, admin);
+  const shift = await service.createShift({ employeeId: e.id, branchId: e.branchId, templateId: template.id, workDate: "2026-11-12" }, admin);
   await service.updateConfig({ gracePeriodMinutes: 0, checkoutWindowMinutes: 60, latePenaltyPct: 10, earlyLeavePenaltyPct: 10, earlyCheckinMinutes: 15, allowDoubleCheckin: false, doubleCheckinEarlyMinutes: 0, doubleCheckinLateMinutes: 0 }, admin);
   return { e, actor: staff(e), template, shift, setTime: (iso) => { instant = Date.parse(iso); } };
 }
@@ -42,13 +44,13 @@ test("date/overnight boundaries and invalid dates", () => {
 });
 test("concurrent duplicate assignment rejected; overlap rejected; adjacent ca permitted", async (t) => {
   const f = await fixture(t);
-  const results = await Promise.allSettled([1, 2].map(() => service.createShift({ employeeId: f.e.id, templateId: f.template.id, workDate: "2026-11-13" }, admin)));
+  const results = await Promise.allSettled([1, 2].map(() => service.createShift({ employeeId: f.e.id, branchId: f.e.branchId, templateId: f.template.id, workDate: "2026-11-13" }, admin)));
   assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
   assert.equal(results.find((r) => r.status === "rejected").reason.status, 409);
   const overlap = await service.createTemplate({ templateCode: randomUUID(), name: "Trùng giờ", startTime: "11:00", endTime: "14:00" }, admin);
-  await assert.rejects(service.createShift({ employeeId: f.e.id, templateId: overlap.id, workDate: "2026-11-12" }, admin), { status: 409 });
+  await assert.rejects(service.createShift({ employeeId: f.e.id, branchId: f.e.branchId, templateId: overlap.id, workDate: "2026-11-12" }, admin), { status: 409 });
   const adjacent = await service.createTemplate({ templateCode: randomUUID(), name: "Liền ca", startTime: "12:00", endTime: "17:00" }, admin);
-  assert.ok((await service.createShift({ employeeId: f.e.id, templateId: adjacent.id, workDate: "2026-11-12" }, admin)).id);
+  assert.ok((await service.createShift({ employeeId: f.e.id, branchId: f.e.branchId, templateId: adjacent.id, workDate: "2026-11-12" }, admin)).id);
 });
 test("Wi-Fi preflight fails before returning today shifts; employee id differs from user id", async (t) => {
   const f = await fixture(t); f.setTime("2026-11-12T07:00:00+07:00");
@@ -75,7 +77,7 @@ test("check-in too early rejected; late allowed and early checkout penalties sum
 test("checkout at deadline is blocked and old unclosed attendance does not block next ca", async (t) => {
   const f = await fixture(t);
   const template2 = await service.createTemplate({ templateCode: randomUUID(), name: "Sau", startTime: "13:00", endTime: "17:00" }, admin);
-  const next = await service.createShift({ employeeId: f.e.id, templateId: template2.id, workDate: "2026-11-12" }, admin);
+  const next = await service.createShift({ employeeId: f.e.id, branchId: f.e.branchId, templateId: template2.id, workDate: "2026-11-12" }, admin);
   f.setTime("2026-11-12T07:00:00+07:00"); await service.checkin({ shiftId: f.shift.id, wifi }, f.actor);
   f.setTime("2026-11-12T13:00:00+07:00");
   await assert.rejects(service.checkout({ shiftId: f.shift.id, wifi }, f.actor), /hết hạn/);
@@ -87,7 +89,7 @@ test("checkout at deadline is blocked and old unclosed attendance does not block
 test("double attendance normalizes both join times and prevents duplicate writes", async (t) => {
   const f = await fixture(t);
   const template2 = await service.createTemplate({ templateCode: randomUUID(), name: "Trưa", startTime: "12:00", endTime: "17:00" }, admin);
-  const next = await service.createShift({ employeeId: f.e.id, templateId: template2.id, workDate: "2026-11-12" }, admin);
+  const next = await service.createShift({ employeeId: f.e.id, branchId: f.e.branchId, templateId: template2.id, workDate: "2026-11-12" }, admin);
   await service.updateConfig({ allowDoubleCheckin: true, doubleCheckinEarlyMinutes: 5, doubleCheckinLateMinutes: 5 }, admin);
   f.setTime("2026-11-12T07:00:00+07:00"); await service.checkin({ shiftId: f.shift.id, wifi }, f.actor);
   f.setTime("2026-11-12T11:58:00+07:00");
@@ -105,7 +107,7 @@ test("double attendance Postgres transaction rolls back previous checkout if nex
     shift: [{ id: previousId, employeeId: e.id, workDate: new Date("2026-11-12"), scheduledStart: "07:00", scheduledEnd: "12:00", status: "đang làm" },
       { id: nextId, employeeId: e.id, workDate: new Date("2026-11-12"), scheduledStart: "12:00", scheduledEnd: "17:00", status: "đang làm" }],
     attendance: [{ id: randomUUID(), shiftId: previousId, employeeId: e.id, checkIn: new Date("2026-11-12T07:00:00+07:00"), checkOut: null }],
-    attendanceConfig: [{ isSingleton: true, gracePeriodMinutes: 0, checkoutWindowMinutes: 60, allowDoubleCheckin: true, doubleCheckinEarlyMinutes: 5, doubleCheckinLateMinutes: 5, latePenaltyPct: 10, earlyLeavePenaltyPct: 10 }],
+    attendanceConfig: [{ branchId: null, gracePeriodMinutes: 0, checkoutWindowMinutes: 60, allowDoubleCheckin: true, doubleCheckinEarlyMinutes: 5, doubleCheckinLateMinutes: 5, latePenaltyPct: 10, earlyLeavePenaltyPct: 10 }],
   };
   const fake = {};
   for (const model of Object.keys(store)) fake[model] = {
@@ -139,21 +141,119 @@ test("manual admin times work after expiry, manager cannot cross branch, monthly
 });
 test("common task shared completion only for assigned ca; personal task direct and isolated", async (t) => {
   const f = await fixture(t); const colleague = employee({ branchId: f.e.branchId }); const outsider = employee({ branchId: f.e.branchId });
-  await service.createShift({ employeeId: colleague.id, templateId: f.template.id, workDate: "2026-11-12" }, admin);
+  await service.createShift({ employeeId: colleague.id, branchId: colleague.branchId, templateId: f.template.id, workDate: "2026-11-12" }, admin);
   const shared = await service.createTask({ title: "Dọn chung", branchId: f.e.branchId, workDate: "2026-11-12", templateId: f.template.id, requirePhoto: true }, admin);
   await assert.rejects(service.updateTask(shared.id, { status: "done" }, f.actor), /minh chứng/);
   await assert.rejects(service.updateTask(shared.id, { status: "done", proofPhotoUrl: "http://image" }, staff(outsider)), { status: 403 });
   await service.updateTask(shared.id, { status: "done", proofPhotoUrl: "http://image" }, f.actor);
   assert.equal((await service.getTaskById(shared.id, staff(colleague))).status, "done");
+  const special = await service.createTask({ title: "Đặc cách", branchId: f.e.branchId, workDate: "2026-11-12", templateId: f.template.id, requirePhoto: true }, admin);
+  const bypassed = await service.updateTask(special.id, { status: "done" }, admin);
+  assert.equal(bypassed.status, "done");
+  assert.ok(!bypassed.proofPhotoUrl);
   const personal = await service.createTask({ title: "Riêng", assignedTo: f.e.id }, admin);
   assert.ok((await service.listTasks({}, f.actor)).some((r) => r.id === personal.id));
   assert.ok(!(await service.listTasks({ workDate: "2026-11-12" }, f.actor)).some((r) => r.id === personal.id));
   await assert.rejects(service.updateTask(personal.id, { status: "done" }, staff(colleague)), { status: 403 });
 });
-test("configuration strict values and no write permissions for internal/read staff", async () => {
+test("task deadlines preserve time and timezone across create, update and completion", async () => {
+  const e = employee();
+  const task = await service.createTask({ title: "Deadline", assignedTo: e.id, dueDate: "2026-11-15T17:30:00+07:00" }, admin);
+  assert.equal(new Date(task.dueDate).toISOString(), "2026-11-15T10:30:00.000Z");
+  const changed = await service.updateTask(task.id, { dueDate: "2026-11-16T18:45:00+07:00" }, admin);
+  assert.equal(new Date(changed.dueDate).toISOString(), "2026-11-16T11:45:00.000Z");
+  const done = await service.updateTask(task.id, { status: "done" }, staff(e));
+  assert.equal(new Date(done.dueDate).toISOString(), "2026-11-16T11:45:00.000Z");
+  await assert.rejects(service.createTask({ title: "Bad deadline", assignedTo: e.id, dueDate: "2026-11-15T17:30" }, admin), { status: 400 });
+  const legacy = await service.createTask({ title: "Legacy date", assignedTo: e.id, dueDate: "2026-11-15" }, admin);
+  assert.equal(new Date(legacy.dueDate).toISOString(), "2026-11-14T17:00:00.000Z");
+});
+
+test("photo submitter names resolve by user ID, deduplicate lookups and tolerate lookup failure", async (t) => {
+  const e = employee(); const actor = staff(e);
+  const tasks = await Promise.all([1, 2].map(() => service.createTask({ title: "Photo", assignedTo: e.id, requirePhoto: true }, admin)));
+  for (const task of tasks) await service.updateTask(task.id, { proofPhotoUrl: "http://image", status: "done" }, actor);
+  const lookup = t.mock.method(identity, "getUserName", async (id) => {
+    assert.equal(id, actor.userId);
+    assert.notEqual(id, e.id);
+    return { id, name: "Tên người nộp" };
+  });
+  const listed = (await service.listTasks({ assignedTo: e.id }, admin));
+  assert.equal(lookup.mock.callCount(), 1);
+  assert.ok(listed.every((task) => task.photoSubmittedByName === "Tên người nộp"));
+  assert.equal((await service.getTaskById(tasks[0].id, admin)).photoSubmittedByName, "Tên người nộp");
+  const submittedAt = listed[0].photoSubmittedAt;
+  const approved = await service.updateTask(tasks[0].id, { status: "done", proofPhotoUrl: "http://image" }, admin);
+  assert.equal(approved.photoSubmittedBy, actor.userId);
+  assert.equal(new Date(approved.photoSubmittedAt).getTime(), new Date(submittedAt).getTime());
+  t.mock.method(identity, "getUserName", async () => { throw new Error("offline"); });
+  assert.equal((await service.getTaskById(tasks[0].id, admin)).photoSubmittedByName, null);
+});
+
+test("configuration strict values, per-branch scope, no write for internal", async () => {
   await assert.rejects(service.updateConfig({ latePenaltyPct: 101 }, admin), { status: 400 });
   await assert.rejects(service.updateConfig({ latePenaltyAmount: 20000 }, admin), { status: 400 });
-  await assert.rejects(service.getConfig({ userId: randomUUID(), role: "staff" }), { status: 403 });
   await assert.rejects(service.updateConfig({ latePenaltyPct: 1 }, { internal: true }), { status: 403 });
   await assert.rejects(service.updateConfig({ latePenaltyPct: 1 }, { internal: true, role: "admin", userId: randomUUID() }), { status: 403 });
+  // Staff/manager chỉ đọc được cấu hình; manager sửa chi nhánh mình, không sửa chi nhánh khác.
+  await assert.rejects(service.updateConfig({ gracePeriodMinutes: 3 }, { userId: randomUUID(), role: "staff" }), { status: 403 });
+  const branchA = randomUUID(); const branchB = randomUUID();
+  const managerA = { userId: randomUUID(), role: "manager", branchId: branchA };
+  await assert.rejects(service.updateConfig({ gracePeriodMinutes: 3 }, managerA, branchB), { status: 403 });
+  await assert.rejects(service.getConfig(managerA, branchB), { status: 403 });
+  assert.equal((await service.getConfig(managerA)).branchId, null);
+  const savedA = await service.updateConfig({ gracePeriodMinutes: 7 }, managerA);
+  assert.equal(savedA.branchId, branchA); assert.equal(savedA.gracePeriodMinutes, 7);
+  // Admin: không truyền branchId -> row mặc định hệ thống; truyền branchId -> row riêng chi nhánh.
+  assert.equal((await service.updateConfig({ gracePeriodMinutes: 2 }, admin, branchB)).branchId, branchB);
+  assert.equal((await service.getConfig(managerA)).gracePeriodMinutes, 7);
+  assert.equal((await service.getConfig({ userId: randomUUID(), role: "staff", branchId: branchB })).gracePeriodMinutes, 2);
+  assert.equal((await service.getConfig(admin)).gracePeriodMinutes, 0);
+  // Ca thuộc chi nhánh nào dùng cấu hình chi nhánh đó (kế thừa row mặc định khi chưa có row riêng).
+  assert.equal((await service.getConfig(admin, branchA)).gracePeriodMinutes, 7);
+});
+// Q-B-01: getShiftById phải trả ca KÈM chấm công + trạng thái chấm công + trạng thái ca,
+// để service khác (integration) kiểm được "ca đã chấm công chưa".
+test("getShiftById trả kèm chấm công, trạng thái chấm công và trạng thái ca", async (t) => {
+  const f = await fixture(t);
+  const chua = await service.getShiftById(f.shift.id, f.actor);
+  assert.equal(chua.attendance, null); assert.equal(chua.attendanceState, "not_started");
+  assert.equal(chua.canCheckout, false); assert.equal(chua.status, "đang làm");
+  f.setTime("2026-11-12T07:05:00+07:00");
+  await service.checkin({ shiftId: f.shift.id, wifi }, f.actor);
+  const da = await service.getShiftById(f.shift.id, f.actor);
+  assert.ok(da.attendance); assert.ok(da.attendance.checkIn); assert.equal(da.attendance.checkOut, null);
+  assert.equal(da.attendanceState, "working"); assert.equal(da.canCheckout, true);
+  assert.equal(da.status, "đang làm");
+});
+// Q-B-02: ca đã hủy không được tính khi kiểm tra trùng => hủy ca xong phân lại được ca mẫu đó.
+test("ca đã hủy không bị tính khi kiểm tra trùng: hủy xong được phân lại cùng ca mẫu", async (t) => {
+  const f = await fixture(t);
+  await service.updateShift(f.shift.id, { status: "đã hủy" }, admin);
+  const again = await service.createShift({ employeeId: f.e.id, branchId: f.e.branchId, templateId: f.template.id, workDate: "2026-11-12" }, admin);
+  assert.equal(again.status, "đang làm");
+  // Ca đang hiệu lực thì vẫn chặn trùng như cũ.
+  await assert.rejects(service.createShift({ employeeId: f.e.id, branchId: f.e.branchId, templateId: f.template.id, workDate: "2026-11-12" }, admin), { status: 409 });
+});
+// Q-B-03: nhân viên nghỉ việc không được phân ca/chấm công; admin vẫn xem và hủy được ca cũ.
+test("nhân viên nghỉ việc bị chặn phân ca và chấm công, admin vẫn quản lý được ca cũ", async (t) => {
+  const f = await fixture(t);
+  f.e.status = "nghỉ việc";
+  await assert.rejects(service.createShift({ employeeId: f.e.id, branchId: f.e.branchId, templateId: f.template.id, workDate: "2026-11-13" }, admin), { status: 403 });
+  await assert.rejects(service.registerShift({ employeeId: f.e.id, templateId: f.template.id, registerDate: "2026-11-13" }, f.actor), { status: 403 });
+  await assert.rejects(service.checkin({ shiftId: f.shift.id, wifi }, f.actor), { status: 403 });
+  // Đọc lịch sử và thao tác dọn dẹp ca cũ vẫn được phép.
+  assert.equal((await service.getShiftById(f.shift.id, admin)).id, f.shift.id);
+  assert.equal((await service.listShifts({ employeeId: f.e.id }, admin)).length, 1);
+  await service.updateShift(f.shift.id, { status: "đã hủy" }, admin);
+});
+// Q-B-06: giờ bắt đầu = giờ kết thúc là lỗi nhập liệu, không phải ca 24 giờ.
+test("ca mẫu có giờ bắt đầu bằng giờ kết thúc bị từ chối; ca qua đêm vẫn hợp lệ", async () => {
+  await assert.rejects(service.createTemplate({ templateCode: randomUUID(), name: "Trùng giờ", startTime: "08:00", endTime: "08:00" }, admin), { status: 400 });
+  const overnight = await service.createTemplate({ templateCode: randomUUID(), name: "Qua đêm", startTime: "22:00", endTime: "06:00" }, admin);
+  assert.ok(overnight.id);
+  const tpl = await service.createTemplate({ templateCode: randomUUID(), name: "Ca", startTime: "07:00", endTime: "12:00" }, admin);
+  await assert.rejects(service.updateTemplate(tpl.id, { endTime: "07:00" }, admin), { status: 400 });
+  await assert.rejects(service.updateTemplate(tpl.id, { startTime: "12:00" }, admin), { status: 400 });
+  assert.equal((await service.updateTemplate(tpl.id, { endTime: "11:00" }, admin)).endTime, "11:00");
 });

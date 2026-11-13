@@ -39,4 +39,8 @@ Thành công `{data,message}`, lỗi `{error:{code,message}}`; UUID cho ID, ngà
 
 Task chung có một trạng thái/kết quả chung, một người hoàn thành thì cả ca thấy xong. Task riêng gán thẳng, không có bước nhận việc. Task yêu cầu ảnh không được đánh dấu xong khi thiếu minh chứng.
 
+`dueDate` là timestamp ISO có múi giờ, lưu bằng `TIMESTAMPTZ(3)`; API giữ cả giờ và phút. Client cũ gửi `YYYY-MM-DD` vẫn được nhận, hiểu là 00:00 tại Việt Nam. Migration `20261113180000_task_deadline_timestamp` chuyển hạn cũ sang 00:00 cùng ngày tại Việt Nam; dữ liệu cũ không có giờ để khôi phục.
+
+Khi đọc nhiệm vụ, BE tra `photoSubmittedBy` (users.id) qua `IDENTITY_SERVICE_URL` và trả thêm `photoSubmittedByName`. Tuyến tra tên trong Identity chỉ nhận token nội bộ và chỉ trả mã/tên. Nếu tài khoản không còn hoặc Identity tạm ngừng, tên trả `null`; nhiệm vụ và ảnh vẫn đọc được. `photoSubmittedAt` là giờ nộp ảnh, không phải thời điểm chụp.
+
 Không còn archive hoặc route cũ trùng chức năng. Ghi chấm công thủ công gửi audit tới Integration sau khi lưu; nếu Integration lỗi thì ghi cảnh báo server, không báo thất bại giả cho bản ghi đã lưu. Chưa có cơ chế đảm bảo audit xuyên DB khi dịch vụ nhận nhật ký ngừng hoạt động.
