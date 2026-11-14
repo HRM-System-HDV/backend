@@ -37,7 +37,7 @@ function ttlToMs(value, fallbackMs) {
   return Number(match[1]) * unitMs;
 }
 
-const ACCESS_COOKIE_MAX_AGE_MS = ttlToMs(config.jwtExpiresIn, 15 * 60 * 1000);
+const ACCESS_COOKIE_MAX_AGE_MS = ttlToMs(config.jwtExpiresIn, 7 * 24 * 60 * 60 * 1000);
 const REFRESH_COOKIE_MAX_AGE_MS = ttlToMs(config.jwtRefreshExpiresIn, 7 * 24 * 60 * 60 * 1000);
 
 function cookieOptions(maxAge) {

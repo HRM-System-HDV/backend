@@ -22,8 +22,9 @@ datasource db {
 }
 
 // Quy tắc nghiệp vụ; CHECK/index bổ sung nằm trong migration của service:
-// - Mọi loại Request chỉ là mẫu đơn: duyệt/chấp nhận không tự sửa lịch, chấm công,
-//   lương hay thanh toán. Người có quyền thực hiện nội dung ở chức năng tương ứng.
+// - Ba loại Request (leave/advance/work_supplement) chỉ là mẫu đơn: duyệt không tự
+//   sửa chấm công, lương hay thanh toán. Riêng shift_swap: duyệt/chấp nhận là lệnh
+//   đổi lịch phân ca thật qua POST /api/shifts/swap nội bộ của work-service.
 // - leave: bắt buộc hai ngày nghỉ, ngày kết thúc >= ngày bắt đầu.
 // - advance: bắt buộc advanceAmount > 0.
 // - shift_swap: bắt buộc sourceShiftId và targetEmployeeId; targetShiftId có thể

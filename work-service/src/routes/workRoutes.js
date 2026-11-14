@@ -10,6 +10,8 @@ router.get("/shifts/:id", c.getShift);
 router.put("/shifts/:id", c.updateShift);
 router.delete("/shifts/:id", c.deleteShift);
 router.post("/shifts/:id/assign", c.assignShift);
+// Nội bộ: integration-service đổi lịch thật khi duyệt/chấp nhận đơn đổi ca.
+router.post("/shifts/swap", c.swapShifts);
 router.get("/shift-templates", c.listTemplates);
 router.post("/shift-templates", c.createTemplate);
 router.put("/shift-templates/:id", c.updateTemplate);

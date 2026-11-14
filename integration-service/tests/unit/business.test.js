@@ -16,6 +16,9 @@ const staff={userId:randomUUID(),employeeId:employeeA.id,role:"staff",branchId:b
 clients.employee=async id=>[employeeA,employeeB].find(e=>e.id===id);
 clients.employees=async query=>[employeeA,employeeB].filter(e=>!query.branchId || e.branchId===query.branchId);
 clients.shifts=async()=>[];
+// Mặc định giả lập work-service đổi lịch thành công; test nào cần thì ghi lời gọi lại.
+const swapCalls=[];
+clients.swapShifts=async(body)=>{swapCalls.push(body);return{source:null,target:null};};
 test("bản tin chi nhánh/toàn thể và quyền manager",async()=>{
   await s.contentWrite("news",null,{title:"Toàn thể",summary:"Tóm tắt",content:"Nội dung",publishDate:"2026-11-12",tag:"tin",branchId:null},admin);
   const row=await s.contentWrite("news",null,{title:"Chi nhánh",summary:"Tóm tắt",content:"Nội dung",publishDate:"2026-11-12",tag:"tin",branchId:branchA},manager);
@@ -64,9 +67,27 @@ test("đổi ca trùng lịch bị từ chối và chỉ nhân viên đích ch�
   await assert.rejects(s.createRequest(body,staff),/đã có ca/);
   clients.shifts=async()=>[];clients.attendanceConfig=async()=>({shiftSwapMode:"mutual_acceptance"});
   const row=await s.createRequest(body,staff);
+  const before=swapCalls.length;
   await assert.rejects(s.reviewRequest(row.id,true,{},staff,true),/quyền/);
+  assert.equal(swapCalls.length,before,"người không phải đích không được đổi lịch");
+  assert.equal(row.status,"pending");
   const result=await s.reviewRequest(row.id,true,{}, {...staff,userId:randomUUID(),employeeId:target.id},true);
   assert.equal(result.status,"approved");
+  assert.equal(swapCalls.length,before+1,"chấp nhận đơn đổi ca phải đổi lịch thật ở work-service");
+  assert.deepEqual(swapCalls[before],{sourceShiftId:source.id,targetShiftId:null,targetEmployeeId:target.id});
+});
+test("work-service từ chối đổi lịch thì đơn vẫn còn pending và không gửi kết quả",async()=>{
+  const target={...employeeB,branchId:branchA};const previousEmployee=clients.employee;clients.employee=async id=>id===employeeA.id?employeeA:target;
+  const source={id:randomUUID(),employeeId:employeeA.id,workDate:"2099-01-01",templateId:randomUUID(),scheduledStart:"07:00",scheduledEnd:"12:00",status:"đang làm",attendance:null};
+  clients.shift=async()=>source;clients.shifts=async()=>[];clients.attendanceConfig=async()=>({shiftSwapMode:"manager_approval"});
+  const row=await s.createRequest({type:"shift_swap",title:"Đổi ca",content:"Nhờ làm thay",sourceShiftId:source.id,targetEmployeeId:target.id},staff);
+  const before=swapCalls.length;
+  const previousSwap=clients.swapShifts;
+  clients.swapShifts=async()=>{throw Object.assign(new Error("Chỉ được hoán đổi ca chưa đến giờ và chưa chấm công"),{status:409});};
+  await assert.rejects(s.reviewRequest(row.id,true,{},manager),/chưa đến giờ/);
+  assert.equal(swapCalls.length,before,"work-service phải được gọi và từ chối");
+  assert.equal((await s.getRequest(row.id,manager)).status,"pending","lịch chưa đổi thì đơn không được ghi approved");
+  clients.swapShifts=previousSwap;clients.employee=previousEmployee;
 });
 test("Wi-Fi nội bộ lọc chi nhánh, chỉ admin được ghi",async()=>{
   const row=await s.contentWrite("wifiConfig",null,{ssid:"Office",bssid:"aa:bb:cc:dd:ee:ff",branchId:branchA},admin);

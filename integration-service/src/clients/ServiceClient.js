@@ -19,6 +19,7 @@ module.exports = {
   employee: id => call(config.organizationServiceUrl, `/api/employees/${encodeURIComponent(id)}`),
   shifts: query => call(config.workServiceUrl, `/api/shifts?${new URLSearchParams(query || {})}`),
   shift: id => call(config.workServiceUrl, `/api/shifts/${encodeURIComponent(id)}`),
+  swapShifts: (body, actor) => call(config.workServiceUrl, "/api/shifts/swap", {method:"POST",body,actor}),
   attendanceConfig: branchId => call(config.workServiceUrl, `/api/attendance/config${branchId ? `?branchId=${encodeURIComponent(branchId)}` : ""}`),
   payout: (body, actor) => call(config.payrollServiceUrl, "/api/payroll/payouts", {method:"POST",body,actor}),
 };

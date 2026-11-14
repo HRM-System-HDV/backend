@@ -200,10 +200,14 @@ async function getShiftById(key, caller) {
   const attendance = (await rows("attendance")).find((a) => a.shiftId === shift.id) || null;
   return shiftProjection(shift, attendance, cfg);
 }
+function shiftConflictExclusions(excluding) {
+  return Array.isArray(excluding) ? excluding : [excluding];
+}
 async function checkShiftConflict(candidate, excluding, tx) {
+  const skip = new Set(shiftConflictExclusions(excluding));
   const { start, end } = time.bounds(candidate);
   for (const row of await rows("shift", tx)) {
-    if (row.id === excluding || row.employeeId !== candidate.employeeId) continue;
+    if (skip.has(row.id) || row.employeeId !== candidate.employeeId) continue;
     // Ca ĐÃ HỦY không tính vào kiểm tra trùng/chồng giờ (cả ca đang xét lẫn ca đã có):
     // hủy ca xong vẫn được phân lại đúng ca mẫu đó trong ngày.
     if (row.status === "đã hủy" || candidate.status === "đã hủy") continue;
@@ -243,6 +247,45 @@ async function updateShift(key, payload, caller) {
     if (data.templateId) { const template = await find("shiftTemplate", data.templateId, tx); data.scheduledStart = template.startTime; data.scheduledEnd = template.endTime; }
     const candidate = { ...live, ...data }; await checkShiftConflict(candidate, key, tx);
     return update("shift", key, data, tx);
+  });
+}
+// Hoán đổi ca theo đơn shift_swap đã được duyệt/chấp nhận. Đây là thao tác NỘI BỘ:
+// integration-service gọi bằng x-internal-token vì người phản hồi đơn có thể là nhân
+// viên (chế độ mutual_acceptance) nên không vượt qua được manager() của PUT /shifts/:id.
+// Đổi lịch THẬT (khác với các loại đơn khác vốn chỉ là mẫu đơn) và chỉ đổi khi cả hai
+// ca còn chưa tới giờ và chưa chấm công; thất bại thì đơn vẫn còn pending.
+async function swapShiftEmployees(payload, caller) {
+  requireCaller(caller);
+  if (!caller.internal) throw new ForbiddenError("Chỉ nghiệp vụ nội bộ được hoán đổi ca");
+  const data = fields(payload, ["sourceShiftId", "targetShiftId", "targetEmployeeId"]);
+  const sourceKey = id(data.sourceShiftId, "sourceShiftId");
+  const targetEmployeeId = id(data.targetEmployeeId, "targetEmployeeId");
+  const targetKey = data.targetShiftId ? id(data.targetShiftId, "targetShiftId") : null;
+  const source = await getRawShift(sourceKey, caller);
+  const targetEmployee = await employeeScope(targetEmployeeId, caller, { requireActive: true });
+  let target = null;
+  if (targetKey) {
+    target = await getRawShift(targetKey, caller);
+    if (target.employeeId !== targetEmployeeId) throw new ConflictError("Ca đích không thuộc nhân viên được nhờ");
+    await employeeScope(source.employeeId, caller, { requireActive: true });
+  }
+  for (const row of [source, target].filter(Boolean)) {
+    if (row.status === "đã hủy") throw new ConflictError("Ca đã hủy, không hoán đổi được");
+    if (row.branchId !== targetEmployee.branchId) throw new ConflictError("Ca và nhân viên được nhờ phải ở cùng chi nhánh");
+  }
+  const swapped = [sourceKey, ...(targetKey ? [targetKey] : [])];
+  return atomic(async (tx) => {
+    const liveSource = await find("shift", sourceKey, tx);
+    const liveTarget = targetKey ? await find("shift", targetKey, tx) : null;
+    const attended = await rows("attendance", tx);
+    for (const row of [liveSource, liveTarget].filter(Boolean)) {
+      if (attended.some((a) => a.shiftId === row.id && (a.checkIn || a.checkOut)) || Date.now() >= time.bounds(row).start.getTime()) throw new ConflictError("Chỉ được hoán đổi ca chưa đến giờ và chưa chấm công");
+    }
+    await checkShiftConflict({ ...liveSource, employeeId: targetEmployeeId }, swapped, tx);
+    if (liveTarget) await checkShiftConflict({ ...liveTarget, employeeId: source.employeeId }, swapped, tx);
+    const savedSource = await update("shift", sourceKey, { employeeId: targetEmployeeId }, tx);
+    const savedTarget = liveTarget ? await update("shift", targetKey, { employeeId: source.employeeId }, tx) : null;
+    return { source: savedSource, target: savedTarget };
   });
 }
 async function deleteShift(key, caller) {
@@ -483,6 +526,6 @@ async function deleteTask(key, caller) {
   await IntegrationClient.deleteFileByUrl(row.proofPhotoUrl); return { ok: true };
 }
 module.exports = { getConfig, updateConfig, listTemplates, createTemplate, updateTemplate, deleteTemplate,
-  listShifts, createShift, updateShift, deleteShift, getShiftById, registerShift, listRegistrations, deleteRegistration,
+  listShifts, createShift, updateShift, swapShiftEmployees, deleteShift, getShiftById, registerShift, listRegistrations, deleteRegistration,
   preflight, checkin, checkout, doubleAttendance, saveAttendance, listAttendance,
   listTasks, createTask, updateTask, deleteTask, getTaskById };

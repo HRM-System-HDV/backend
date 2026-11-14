@@ -18,7 +18,7 @@ function sessionMiddleware(req, _res, next) {
     const token = extractToken(req);
     if (!token) throw new UnauthorizedError("Thiếu phiên đăng nhập");
     const decoded = verifyToken(token);
-    // Refresh token (hạn 7 ngày) không được dùng thay access token (hạn 15 phút).
+    // Refresh token không được dùng thay access token (phân biệt bằng claim type=refresh).
     if (decoded.type === "refresh") {
       throw new UnauthorizedError("Token cung cấp không phải là access token");
     }

@@ -12,6 +12,7 @@ module.exports = {
   updateShift: execute((req, caller) => WorkService.updateShift(req.params.id, req.body, caller)),
   deleteShift: execute((req, caller) => WorkService.deleteShift(req.params.id, caller)),
   assignShift: execute((req, caller) => WorkService.updateShift(req.params.id, { employeeId: req.body.employeeId }, caller)),
+  swapShifts: execute((req, caller) => WorkService.swapShiftEmployees(req.body, caller)),
   listTemplates: execute((_req, caller) => WorkService.listTemplates(caller)),
   createTemplate: execute((req, caller) => WorkService.createTemplate(req.body, caller), 201),
   updateTemplate: execute((req, caller) => WorkService.updateTemplate(req.params.id, req.body, caller)),

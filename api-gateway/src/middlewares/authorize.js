@@ -35,6 +35,8 @@ const rules = [
   { methods: WRITE, path: /^\/api\/attendance\/config$/, roles: MANAGERS },
   { methods: ["PUT", "PATCH", "DELETE"], path: /^\/api\/attendance\/[^/]+$/, roles: MANAGERS },
   { methods: ["POST"], path: /^\/api\/shifts$/, roles: MANAGERS },
+  // Hoán đổi ca khi duyệt đơn là lệnh nội bộ integration -> work; client không bao giờ gọi trực tiếp.
+  { methods: ["POST"], path: /^\/api\/shifts\/swap$/, roles: [] },
   { methods: ["POST"], path: /^\/api\/shifts\/[^/]+\/assign$/, roles: MANAGERS },
   { methods: ["PUT", "DELETE"], path: /^\/api\/shifts\/[^/]+$/, roles: MANAGERS },
   // Chỉ quản lý duyệt đơn; nhân viên chấp nhận nhờ làm thay/đổi ca là luồng khác.

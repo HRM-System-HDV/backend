@@ -147,9 +147,11 @@ async function reviewRequest(id,approved,body,who,peer=false) {
   if (row.status!=="pending") throw error("Đơn đã được xử lý");
   if (peer) { if (row.type!=="shift_swap" || row.shiftSwapMode!=="mutual_acceptance" || row.targetEmployeeId!==who.employeeId) throw error("Bạn không có quyền phản hồi đơn này",403,"FORBIDDEN"); }
   else { manager(who); branch(who,row.branchId,true); if (row.type==="shift_swap" && row.shiftSwapMode==="mutual_acceptance" && who.role!=="admin") throw error("Đơn này do nhân viên đích phản hồi",403,"FORBIDDEN"); }
-  if (approved && row.type==="shift_swap") await validateSwap(row);
+  // Đơn đổi ca KHÁC ba loại đơn còn lại: duyệt/chấp nhận là lệnh đổi lịch phân ca thật.
+  // Work phải đổi trước; nếu Work từ chối thì đơn vẫn còn pending và người dùng thấy lỗi.
+  if (approved && row.type==="shift_swap") { await validateSwap(row); await clients.swapShifts({sourceShiftId:row.sourceShiftId,targetShiftId:row.targetShiftId||null,targetEmployeeId:row.targetEmployeeId},who); }
   const data={status:approved?"approved":"rejected",reviewedBy:uuid(who.userId,"userId"),reviewedByName:who.name,reviewedAt:new Date().toISOString(),reviewNote:body.reviewNote || null};
-  // Chỉ cập nhật mẫu đơn, tuyệt đối không gọi API ghi ca/chấm công/lương.
+  // Ngoài đổi ca, chỉ cập nhật mẫu đơn; tuyệt đối không gọi API ghi chấm công/lương/thanh toán.
   const db=database.getPrisma();let updated;
   if(db){const result=await db.request.updateMany({where:{id,status:"pending"},data:dates(data)});if(result.count!==1)throw error("Đơn đã được xử lý",409,"DUPLICATE_RESOURCE");updated=await get("request",id);}
   else {const live=memory.request.find(item=>item.id===id);if(live.status!=="pending")throw error("Đơn đã được xử lý",409,"DUPLICATE_RESOURCE");Object.assign(live,data);updated={...live};}
