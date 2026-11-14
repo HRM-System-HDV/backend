@@ -14,5 +14,4 @@ module.exports = {
   generatePayslip: action((req, actor) => service.generatePayslipUseCase(req.body, actor), 201),
   updatePayslip: action((req, actor) => service.updatePayslip(req.params.id, req.body, actor)),
   confirmPayslip: action((req, actor) => service.confirmPayslip(req.params.id, actor)),
-  setPayslipStatus: action((req, actor) => service.setPayslipStatus(req.params.id, req.body.status, actor)),
 };

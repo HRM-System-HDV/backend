@@ -56,3 +56,7 @@ test("public task deadline round-trips hours and minutes without date-only conve
   assert.equal(updated.status, 200);
   assert.equal(updated.body.data.dueDate, created.body.data.dueDate);
 });
+
+test("preflight endpoint is removed", async () => {
+  await request(app).post("/api/attendance/preflight").set({"x-user-id":randomUUID(),"x-user-role":"admin"}).send({}).expect(404);
+});

@@ -44,14 +44,13 @@ for(const [route,kind] of [["news","news"],["regulations","regulation"],["wifi-c
 }
 app.get("/api/requests",h((req,who)=>s.listRequests(req.query,who)));
 app.post("/api/requests",h((req,who)=>s.createRequest(req.body,who),201));
+app.get("/api/requests/shift-options",h((req,who)=>s.shiftOptions(req.query,who)));
 app.get("/api/requests/:id",h((req,who)=>s.getRequest(req.params.id,who)));
 for(const [action,approved,peer] of [["approve",true,false],["reject",false,false],["accept",true,true],["decline",false,true]]) app.put(`/api/requests/:id/${action}`,h((req,who)=>s.reviewRequest(req.params.id,approved,req.body || {},who,peer)));
 app.delete("/api/requests/:id",h((req,who)=>s.deleteRequest(req.params.id,who)));
 app.get("/api/notifications/settings",h((_req,who)=>s.notificationSettings(who)));
 app.put("/api/notifications/settings",h((req,who)=>s.notificationSettings(who,req.body)));
-app.post("/api/notifications/reminders",h((_req,who)=>s.reminders(who)));
 app.get("/api/notifications",h(async(_req,who)=>{await s.reminders(who);return s.listNotifications(who);}));
-app.post("/api/notifications",h((req,who)=>s.sendNotification(req.body,who),201));
 app.put("/api/notifications/read-all",h((_req,who)=>s.readAllNotifications(who)));
 app.put("/api/notifications/:id/read",h((req,who)=>s.readNotification(req.params.id,who)));
 app.get("/api/soap-config",h((_req,who)=>s.soapConfig(who)));

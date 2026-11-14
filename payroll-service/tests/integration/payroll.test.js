@@ -26,3 +26,8 @@ test("HTTP generates, owner confirms, only admin pays and balance reduces once",
   const paid = (await request(app).get(`/api/payroll/payslips/${slip.id}`).set(staff).expect(200)).body.data;
   assert.equal(paid.confirmedBy, userId); assert.equal(paid.status, "paid");
 });
+test("only POST confirm remains; legacy confirmation aliases return 404", async () => {
+  const admin = {"x-user-id": randomUUID(), "x-user-role": "admin"};
+  const id = randomUUID();
+  for (const suffix of ["confirm", "status"]) await request(app).put(`/api/payroll/payslips/${id}/${suffix}`).set(admin).send({status:"confirmed"}).expect(404);
+});

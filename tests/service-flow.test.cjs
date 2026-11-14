@@ -140,9 +140,7 @@ test("HTTP liên service: hồ sơ, ca, công việc, tích lũy, xác nhận v�
   assert.equal((await call("GET", "/api/tasks", undefined, outsiderToken)).length, 0);
 
   await call("POST", "/api/wifi-configs", { ssid: "HRM-A", bssid: "aa:bb:cc:dd:ee:01", branchId: branch.id }, admin, 201);
-  await call("POST", "/api/attendance/preflight", { wifi: { bssid: "aa:bb:cc:dd:ee:99" } }, firstToken, 403);
-  const ready = await call("POST", "/api/attendance/preflight", { wifi: { ssid: "HRM-A", bssid: "aa:bb:cc:dd:ee:01" } }, firstToken);
-  assert.ok(Array.isArray(ready.shifts));
+  await call("POST", "/api/attendance/checkin", { shiftId: shift.id, wifi: { bssid: "aa:bb:cc:dd:ee:99" } }, firstToken, 403);
 
   const form = await call("POST", "/api/requests", { type: "work_supplement", employeeId: first.id, title: "Đề nghị", content: "Đề nghị xem lại công", sourceShiftId: shift.id, requestedCheckIn: `${workDate}T06:00:00+07:00` }, firstToken, 201);
   const reviewed = await call("PUT", `/api/requests/${form.id}/approve`, {});
@@ -182,12 +180,16 @@ test("HTTP liên service: hồ sơ, ca, công việc, tích lũy, xác nhận v�
 
   await call("POST", "/api/news", { title: "Branch only", summary: "Summary", content: "Content", publishDate: workDate, tag: "test", branchId: branch.id }, admin, 201);
   assert.equal((await call("GET", "/api/news", undefined, outsiderToken)).length, 0);
-  await call("POST", "/api/notifications", { title: "Branch notice", body: "Test", branchId: branch.id }, admin, 201);
+  await call("POST", "/api/notifications", { title: "Removed", body: "Test" }, admin, 404);
+  await call("POST", "/api/notifications/reminders", {}, admin, 404);
+  await call("POST", "/api/attendance/preflight", {}, admin, 404);
   const notices = await call("GET", "/api/notifications", undefined, firstToken);
-  const notice = notices.find(row => row.title === "Branch notice");
-  assert.ok(notice);
+  const notice = notices.find(row => row.requestId === form.id);
+  assert.ok(notice, "Duyệt đơn tự tạo thông báo dù không còn POST thông báo riêng");
   await call("PUT", `/api/notifications/${notice.id}/read`, {}, firstToken);
-  const secondNotice = (await call("GET", "/api/notifications", undefined, secondToken)).find(row => row.title === "Branch notice");
+  const secondForm = await call("POST", "/api/requests", {type: "advance", title: "Ứng lương", content: "Đề nghị", advanceAmount: "1000"}, secondToken, 201);
+  await call("PUT", `/api/requests/${secondForm.id}/approve`, {});
+  const secondNotice = (await call("GET", "/api/notifications", undefined, secondToken)).find(row => row.requestId === secondForm.id);
   assert.equal(secondNotice.isRead, false);
-  assert.ok(!(await call("GET", "/api/notifications", undefined, outsiderToken)).some(row => row.title === "Branch notice"));
+  assert.ok(!(await call("GET", "/api/notifications", undefined, outsiderToken)).some(row => [form.id, secondForm.id].includes(row.requestId)));
 });

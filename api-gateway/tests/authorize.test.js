@@ -42,13 +42,11 @@ function run(method, path, role) {
 
 // [method, path, role, mong đợi cho qua]
 const cases = [
-  ["POST", "/api/notifications/reminders", "staff", true],
   ["GET", "/api/attendance/config", "manager", true],
   ["GET", "/api/attendance/config", "admin", true],
   ["PUT", "/api/attendance/s1", "staff", false],
   ["PUT", "/api/attendance/s1", "manager", true],
   ["POST", "/api/attendance/double", "staff", true],
-  ["POST", "/api/attendance/preflight", "staff", true],
   ["POST", "/api/payroll/payslips/p1/confirm", "staff", true],
   ["POST", "/api/payroll/payslips/p1/confirm", "manager", true],
   ["GET", "/api/auth/users", "manager", false],
@@ -121,9 +119,6 @@ const cases = [
   ["POST", "/api/wifi-configs", "manager", false],
   ["PUT", "/api/wifi-configs/w1", "admin", true],
   // Gửi thông báo là thao tác quản lý: staff bị chặn, manager/admin được.
-  ["POST", "/api/notifications", "staff", false],
-  ["POST", "/api/notifications", "manager", true],
-  ["POST", "/api/notifications", "admin", true],
   ["PUT", "/api/soap-config", "staff", false],
   ["PUT", "/api/soap-config", "manager", false],
   ["GET", "/api/soap-config", "staff", false],
@@ -148,7 +143,7 @@ const cases = [
   ["POST", "/api/payroll/payslips/generate", "staff", false],
   ["POST", "/api/payroll/payslips/generate", "manager", false],
   ["POST", "/api/payroll/payslips/generate", "admin", true],
-  ["PUT", "/api/payroll/payslips/p1/status", "staff", true],
+  ["PUT", "/api/payroll/payslips/p1/status", "staff", false],
 
   // Nhật ký: mọi vai trò ghi được, xem và xóa đều chỉ admin.
   ["GET", "/api/backlog", "staff", false],
@@ -166,16 +161,12 @@ const cases = [
   ["POST", "/api/auth/sync-employee", "staff", false],
   ["POST", "/api/auth/sync-employee", "admin", false],
 
-  // Lưu trữ file: xem ảnh thì mọi vai trò đăng nhập, xóa/quét mồ côi chỉ admin.
+  // Lưu trữ file: xem ảnh thì mọi vai trò đăng nhập, xóa tệp chỉ admin.
   ["GET", "/api/files/hrm/avatars/a1", "staff", true],
   ["GET", "/api/files/hrm/tasks/t1", "manager", true],
   ["DELETE", "/api/files/hrm/avatars/a1", "staff", false],
   ["DELETE", "/api/files/hrm/avatars/a1", "manager", false],
   ["DELETE", "/api/files/hrm/avatars/a1", "admin", true],
-  ["POST", "/api/files/scan-orphans", "staff", false],
-  ["POST", "/api/files/scan-orphans", "admin", true],
-  ["POST", "/api/files/purge-orphans", "manager", false],
-  ["POST", "/api/files/purge-orphans", "admin", true],
 
 ];
 

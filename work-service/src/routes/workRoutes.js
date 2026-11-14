@@ -18,7 +18,6 @@ router.put("/shift-templates/:id", c.updateTemplate);
 router.delete("/shift-templates/:id", c.deleteTemplate);
 router.get("/attendance/config", c.getConfig);
 router.put("/attendance/config", c.updateConfig);
-router.post("/attendance/preflight", c.preflight);
 router.post("/attendance/checkin", c.checkin);
 router.post("/attendance/checkout", c.checkout);
 router.post("/attendance/double", c.doubleAttendance);

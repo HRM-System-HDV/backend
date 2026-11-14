@@ -26,6 +26,7 @@ function readMigrationSql(serviceDir) {
   return fs
     .readdirSync(migrationsDir, { withFileTypes: true })
     .filter(entry => entry.isDirectory())
+    .sort((a, b) => a.name.localeCompare(b.name))
     .map(entry => fs.readFileSync(path.join(migrationsDir, entry.name, "migration.sql"), "utf8"))
     .join("\n");
 }
@@ -35,21 +36,25 @@ function readMigrationSql(serviceDir) {
 //   ALTER TABLE ... ADD CONSTRAINT "ten" CHECK (...)              (thêm sau)
 function parseCheckConstraints(sql) {
   const names = new Set();
-  const inline = /CONSTRAINT\s+(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))\s+CHECK\s*\(/gi;
-  const added = /ADD\s+CONSTRAINT\s+(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))\s+CHECK\s*\(/gi;
-  const push = (match) => names.add(match[1] || match[2]);
+  // Replay additions and removals in migration order, including drop/re-add.
+  const changes = /DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))|CONSTRAINT\s+(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))\s+CHECK\s*\(/gi;
   let match;
-  while ((match = inline.exec(sql))) push(match);
-  while ((match = added.exec(sql))) push(match);
+  while ((match = changes.exec(sql))) {
+    if (match[1] || match[2]) names.delete(match[1] || match[2]);
+    else names.add(match[3] || match[4]);
+  }
   return names;
 }
 
 // Partial unique index: CREATE UNIQUE INDEX "ten" ... WHERE ...
 function parsePartialUniqueIndexes(sql) {
   const names = new Set();
-  const pattern = /CREATE\s+UNIQUE\s+INDEX\s+"([^"]+)"[^;]*?\bWHERE\b/gi;
+  const pattern = /DROP\s+INDEX\s+(?:IF\s+EXISTS\s+)?"([^"]+)"|CREATE\s+UNIQUE\s+INDEX\s+"([^"]+)"[^;]*?\bWHERE\b/gi;
   let match;
-  while ((match = pattern.exec(sql))) names.add(match[1]);
+  while ((match = pattern.exec(sql))) {
+    if (match[1]) names.delete(match[1]);
+    else names.add(match[2]);
+  }
   return names;
 }
 

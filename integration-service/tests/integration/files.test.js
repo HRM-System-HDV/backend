@@ -36,3 +36,10 @@ test("Prisma FileAsset ghi publicId, UUID và đúng tên cột",async()=>{
     assert.equal(data.publicId,result.publicId);assert.match(data.id,/^[0-9a-f-]{36}$/);assert.equal(data.branchId,staff["x-branch-id"]);assert.equal(data.branchSlug,undefined);assert.equal(data.width,undefined);
   } finally {database.getPrisma=original;}
 });
+
+test("orphan maintenance endpoints have been removed", async () => {
+  for (const route of ["scan-orphans", "purge-orphans"]) {
+    const response = await request(app).post(`/api/files/${route}`).set(admin).send({}).expect(404);
+    assert.equal(response.body.error.code, "NOT_FOUND");
+  }
+});

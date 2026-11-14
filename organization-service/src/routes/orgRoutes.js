@@ -8,7 +8,7 @@ for (const [path,title,plural] of [["branches","Branch","Branches"],["department
   router.get(`/${path}/:id`,controller[`get${title}`]);
   router.post(`/${path}`,controller[`create${title}`]);
   router.put(`/${path}/:id`,controller[`update${title}`]);
-  router.delete(`/${path}/:id`,controller[`delete${title}`]);
+  if (path !== "employees") router.delete(`/${path}/:id`,controller[`delete${title}`]);
 }
 router.post("/employees/:id/leave",controller.leaveEmployee);
 module.exports = router;

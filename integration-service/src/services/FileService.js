@@ -131,52 +131,6 @@ async function findForRegulation(regulationId) {
   return prisma ? prisma.fileAsset.findMany({where:{regulationId,deletedAt:null}}) : [...memoryAssets.values()].filter(row=>row.regulationId===regulationId && !row.deletedAt);
 }
 
-async function scanOrphans(graceHours = 24) {
-  const hours = Number(graceHours);
-  if (!Number.isFinite(hours) || hours < 0 || hours > 24 * 30) {
-    throw validationError("graceHours phải là số từ 0 đến 720");
-  }
-  const files = await storage.walk();
-  const cutoffMs = Date.now() - hours * 3600 * 1000;
-  const orphans = [];
-  for (const file of files) {
-    if (file.mtimeMs > cutoffMs) continue;
-    const publicId = file.relPath.replace(/\.[A-Za-z0-9]+$/, "");
-    const asset = await findAsset(publicId);
-    if (!asset || asset.deletedAt) {
-      orphans.push({ publicId, storagePath: file.relPath, bytes: file.bytes });
-    }
-  }
-  return { orphans, totalBytes: orphans.reduce((sum, o) => sum + o.bytes, 0) };
-}
-
-async function purgeOrphans(publicIds) {
-  if (!Array.isArray(publicIds) || publicIds.length === 0 || publicIds.length > 1000) {
-    throw validationError("Cần danh sách publicIds từ 1 đến 1000 phần tử");
-  }
-  let purged = 0;
-  for (const raw of publicIds) {
-    if (typeof raw !== "string") throw validationError("publicId phải là chuỗi");
-    const id = assertPublicId(raw);
-    const asset = await findAsset(id);
-    if (asset) {
-      if (!asset.deletedAt) throw validationError("Tệp vẫn đang được sử dụng, không phải tệp mồ côi");
-      const result = await deleteByPublicId(id);
-      if (result.deleted) purged += 1;
-      continue;
-    }
-    // File lạ không có trong đăng ký: xóa đúng file khớp publicId trên đĩa.
-    const files = await storage.walk();
-    for (const file of files) {
-      if (file.relPath.replace(/\.[A-Za-z0-9]+$/, "") === id) {
-        const removed = await storage.unlink(file.relPath);
-        if (removed) purged += 1;
-      }
-    }
-  }
-  return { purged };
-}
-
 module.exports = {
   findForRegulation,
   upload,
@@ -184,6 +138,4 @@ module.exports = {
   deleteByPublicId,
   deleteByUrl,
   publicIdFromUrl,
-  scanOrphans,
-  purgeOrphans,
 };

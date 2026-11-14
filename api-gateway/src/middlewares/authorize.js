@@ -47,10 +47,6 @@ const rules = [
   // cấu hình Wi-Fi và cấu hình SOAP là tính năng hệ thống, chỉ admin.
   { methods: WRITE, path: /^\/api\/(news|regulations)(\/|$)/, roles: MANAGERS },
   { methods: WRITE, path: /^\/api\/(wifi-configs|soap-config)(\/|$)/, roles: ["admin"] },
-  // Gửi thông báo là thao tác quản lý: nhân viên không tự bắn thông báo cho
-  // người khác (và không mạo được tên người gửi).
-  { methods: ["POST"], path: /^\/api\/notifications\/reminders$/, roles: ALL },
-  { methods: ["POST"], path: /^\/api\/notifications(\/|$)/, roles: MANAGERS },
   // Đọc cấu hình SOAP lộ endpointUrl/securityMode/allowedIPs/certExpiry nên để
   // admin; WRITE đã có luật riêng ở trên, GET thì hiện không luật nào chặn.
   { methods: ["GET"], path: /^\/api\/soap-config(\/|$)/, roles: ["admin"] },
@@ -59,7 +55,7 @@ const rules = [
   // req.user và luật ["admin"] có tác dụng.
   { methods: WRITE, path: /^\/soap(\/|$)/, roles: ["admin"] },
   // Xác nhận không chi tiền; service kiểm tra nhân viên sở hữu/manager đúng chi nhánh.
-  { methods: ["POST", "PUT", "PATCH"], path: /^\/api\/payroll\/payslips\/[^/]+\/(confirm|status)$/, roles: ALL },
+  { methods: ["POST"], path: /^\/api\/payroll\/payslips\/[^/]+\/confirm$/, roles: ALL },
   // Chi lương là thao tác ngân hàng, manager bị chặn theo mô hình 3 vai trò.
   { methods: WRITE, path: /^\/api\/payroll(\/|$)/, roles: ["admin"] },
   // Số tài khoản và các đợt chi lương là dữ liệu quản trị hệ thống.
@@ -68,7 +64,7 @@ const rules = [
   { methods: ["GET"], path: /^\/api\/backlog(\/|$)/, roles: ["admin"] },
   // Xóa nhật ký hoạt động là thao tác quản trị; ghi nhật ký thì mọi vai trò.
   { methods: ["DELETE"], path: /^\/api\/backlog(\/|$)/, roles: ["admin"] },
-  // Đọc file ảnh thì mọi vai trò đăng nhập; xóa/quét mồ côi chỉ admin.
+  // Đọc file ảnh thì mọi vai trò đăng nhập; xóa tệp chỉ admin.
   { methods: ["POST", "DELETE"], path: /^\/api\/files(\/|$)/, roles: ["admin"] },
 ];
 

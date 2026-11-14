@@ -98,6 +98,16 @@ Không sử dụng tài khoản hoặc mật khẩu mẫu ghi trong tài liệu 
 - `PUT /api/notifications/read-all` đánh dấu các thông báo chưa đọc của chính nhân viên trong phiên; tài khoản chưa gắn hồ sơ trả `{ count: 0 }`.
 - Admin sửa phiếu chưa xác nhận qua `PUT /api/payroll/payslips/:id` với `bonus`, `totalPenalty` và `adjustmentReason`. `totalPenalty` là tổng phạt nhập trực tiếp, thay thế mức tự tính; gửi `null` để dùng lại mức phạt từ chấm công. Giá trị nhập được giữ khi xác nhận và chi lương. Phiếu đã xác nhận/đã thanh toán không được sửa. Cần migration `20261113150000_payslip_manual_penalty` và sinh lại Prisma Client.
 
-- Nhắc chấm công được tạo khi client lấy thông báo/gọi nhắc giờ; chưa có scheduler hoặc push nền khi ứng dụng không hoạt động.
+- Nhắc chấm công được tạo khi client gọi `GET /api/notifications`, theo cài đặt `GET/PUT /api/notifications/settings`; chưa có scheduler hoặc push nền khi ứng dụng không hoạt động.
 - Nhật ký thao tác nhập giờ ở Work được gửi sang Integration theo best-effort; nếu Integration ngừng hoạt động, lưu công thành công không bị báo thất bại giả.
 - Để kiểm chứng DB sau khi khởi động lại năm Postgres local, chạy `npm run test:database`. Bộ test mặc định và test HTTP xuyên service không cần DB thật.
+
+## Endpoint đã thống nhất
+
+- Xác nhận phiếu lương chỉ dùng `POST /api/payroll/payslips/:id/confirm`; đã bỏ hai alias `PUT .../confirm` và `PUT .../status`.
+- Đã bỏ `POST /api/attendance/preflight`; check-in/check-out/chấm công kép tự kiểm tra Wi-Fi của request.
+- Đã bỏ `POST /api/notifications` và `POST /api/notifications/reminders`. Nghiệp vụ vẫn tự tạo thông báo trong service; lấy danh sách thông báo vẫn tạo nhắc theo cài đặt.
+- Web cho Admin lưu `PUT /api/soap-config` và kiểm tra bằng `POST /api/soap-config/ping`. Ping chỉ đọc WSDL, không tạo lệnh chi. Gửi lệnh SOAP là thao tác riêng; WSDL vẫn giữ tại `GET /soap/payroll?wsdl`.
+
+- Xóa đơn yêu cầu chỉ cho Admin/Manager trong phạm vi chi nhánh và chỉ khi đơn đang chờ. Đơn đã duyệt/từ chối không được xóa. Web/Mobile có nút xóa kèm xác nhận trong chi tiết đơn.
+- Đã bỏ alias `DELETE /api/employees/:id`; nhân viên thôi việc qua `POST /api/employees/:id/leave`, giữ nguyên hồ sơ và lịch sử.
