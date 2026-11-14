@@ -48,11 +48,35 @@ async function findById(id) {
   return prisma.notification.findUnique({ where: { id } });
 }
 
+async function nextNotificationId() {
+  const prisma = database.getPrisma();
+  let max = 0;
+  const prefix = "TB-";
+  const scan = (raw) => {
+    const s = String(raw || "").trim().toUpperCase();
+    if (!s.startsWith(prefix)) return;
+    const n = Number(s.slice(prefix.length));
+    if (Number.isInteger(n) && n > max) max = n;
+  };
+  if (prisma) {
+    const rows = await prisma.notification
+      .findMany({ where: { id: { startsWith: prefix } }, select: { id: true } })
+      .catch(() => []);
+    rows.forEach((r) => scan(r.id));
+  } else {
+    memoryNotifications.forEach((r) => scan(r.id));
+  }
+  return `${prefix}${String(max + 1).padStart(4, "0")}`;
+}
+
 async function create(data) {
   const prisma = database.getPrisma();
+  if (!data.id) {
+    data.id = await nextNotificationId();
+  }
   if (!prisma) {
     const newNotif = {
-      id: data.id || `notif-${Date.now()}`,
+      id: data.id,
       isRead: false,
       ...data,
       createdAt: new Date(),

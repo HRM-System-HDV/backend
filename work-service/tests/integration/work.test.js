@@ -27,6 +27,8 @@ test("shifts + attendance + tasks flow", async () => {
   });
   body = await res.json();
   assert.equal(res.status, 201);
+  // Ngày ca luôn được chuẩn hóa DD/MM/YYYY dù client gửi dạng gạch ngang.
+  assert.equal(body.data?.date, "02/10/2026");
   const createdShiftId = body.data?.id;
 
   // Thiếu date -> 400

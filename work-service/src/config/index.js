@@ -8,4 +8,5 @@ module.exports = {
   nodeEnv: process.env.NODE_ENV || "development",
   databaseUrl: process.env.DATABASE_URL || "",
   corsOrigin: (process.env.CORS_ORIGIN || "http://localhost:3000").split(","),
+  integrationServiceUrl: process.env.INTEGRATION_SERVICE_URL || "http://localhost:4005",
 };

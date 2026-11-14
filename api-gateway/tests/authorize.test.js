@@ -106,6 +106,30 @@ const cases = [
   ["POST", "/api/auth/reset-password", "admin", true],
   ["POST", "/api/auth/sync-employee", "staff", false],
   ["POST", "/api/auth/sync-employee", "admin", false],
+
+  // Lưu trữ file: xem ảnh thì mọi vai trò đăng nhập, xóa/quét mồ côi chỉ admin.
+  ["GET", "/api/files/hrm/avatars/a1", "staff", true],
+  ["GET", "/api/files/hrm/tasks/t1", "manager", true],
+  ["DELETE", "/api/files/hrm/avatars/a1", "staff", false],
+  ["DELETE", "/api/files/hrm/avatars/a1", "manager", false],
+  ["DELETE", "/api/files/hrm/avatars/a1", "admin", true],
+  ["POST", "/api/files/scan-orphans", "staff", false],
+  ["POST", "/api/files/scan-orphans", "admin", true],
+  ["POST", "/api/files/purge-orphans", "manager", false],
+  ["POST", "/api/files/purge-orphans", "admin", true],
+
+  // Lưu trữ dữ liệu cũ: mọi thao tác (xem/chạy/khôi phục) chỉ admin.
+  ["POST", "/api/archive/work/run", "staff", false],
+  ["POST", "/api/archive/work/run", "manager", false],
+  ["POST", "/api/archive/integration/preview", "manager", false],
+  ["GET", "/api/archive/work/tasks", "manager", false],
+  ["GET", "/api/archive/integration/requests", "staff", false],
+  ["GET", "/api/archive/integration/notifications/n1", "staff", false],
+  ["POST", "/api/archive/work/tasks/t1/restore", "manager", false],
+  ["POST", "/api/archive/work/run", "admin", true],
+  ["GET", "/api/archive/work/tasks", "admin", true],
+  ["GET", "/api/archive/integration/requests/r1", "admin", true],
+  ["POST", "/api/archive/integration/requests/r1/restore", "admin", true],
 ];
 
 for (const [method, path, role, allowed] of cases) {

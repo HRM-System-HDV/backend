@@ -1,6 +1,11 @@
 "use strict";
 
 const database = require("../config/database");
+const { toVnDate, toVnDateTime } = require("../utils/dateFormat");
+
+function nowVn() {
+  return toVnDateTime(new Date());
+}
 
 let memoryConfig = {
   id: "default",
@@ -11,7 +16,7 @@ let memoryConfig = {
   securityMode: "TransportWithMessageCredential (mTLS + X.509)",
   allowedIPs: ["203.162.10.45", "118.70.124.8", "123.30.55.19", "14.161.32.90"],
   status: "healthy",
-  lastPingTime: new Date().toLocaleString("vi-VN"),
+  lastPingTime: nowVn(),
   avgResponseTime: "128ms",
   certExpiry: "31/12/2026",
   channel: "Gateway (SOAP 1.2 / HTTPS)",
@@ -45,6 +50,7 @@ async function updateConfig(payload) {
   ]) {
     if (payload[k] !== undefined) allowed[k] = payload[k];
   }
+  if (allowed.certExpiry) allowed.certExpiry = toVnDate(allowed.certExpiry) || allowed.certExpiry;
   const prisma = database.getPrisma();
   if (prisma) {
     try {
@@ -62,7 +68,7 @@ async function updateConfig(payload) {
 async function pingGateway() {
   const startTime = Date.now();
   // Giả lập ping nội bộ gateway /soap/payroll?wsdl
-  const nowStr = new Date().toLocaleString("vi-VN");
+  const nowStr = nowVn();
   const elapsed = `${Math.floor(Math.random() * 20 + 35)}ms`;
   const updated = await updateConfig({
     status: "healthy",

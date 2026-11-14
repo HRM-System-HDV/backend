@@ -3,7 +3,7 @@
 function validateShift(body = {}) {
   const errors = [];
   if (!body.employeeId && !body.branchSlug) errors.push("Thiếu employeeId hoặc branchSlug");
-  if (!body.date) errors.push("Ngày ca (date DD-MM-YYYY) là bắt buộc");
+  if (!body.date) errors.push("Ngày ca (date DD/MM/YYYY) là bắt buộc");
   return errors;
 }
 

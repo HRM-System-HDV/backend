@@ -3,7 +3,9 @@
 const database = require("../config/database");
 const { SEED_REQUESTS } = require("../../prisma/seed");
 const NotificationService = require("./NotificationService");
+const FileService = require("./FileService");
 const WorkClient = require("../clients/WorkClient");
+const { toVnDate } = require("../utils/dateFormat");
 
 let memoryRequests = JSON.parse(JSON.stringify(SEED_REQUESTS)).map((r) => ({
   ...r,
@@ -59,15 +61,20 @@ function cleanText(value, max = MAX_TEXT) {
 }
 
 // Chỉ nhận đúng các khóa hiển thị đã biết, tránh client nhét field lạ vào thông báo.
+// Các khóa ngày ca luôn được chuẩn hóa DD/MM/YYYY trước khi lưu.
+const VN_DATE_FIELDS = new Set(["shiftDate", "swapShiftDate"]);
+
 function sanitizeNotificationFields(payload = {}) {
   const columns = {};
   for (const key of NOTIFICATION_TEXT_FIELDS) {
-    const value = cleanText(payload[key], key === "senderPhone" ? 40 : MAX_TEXT);
+    let value = cleanText(payload[key], key === "senderPhone" ? 40 : MAX_TEXT);
+    if (value && VN_DATE_FIELDS.has(key)) value = toVnDate(value) || value;
     if (value) columns[key] = value;
   }
   const metadata = {};
   for (const key of NOTIFICATION_META_FIELDS) {
-    const value = cleanText(payload[key], key === "reason" ? MAX_REASON : MAX_TEXT);
+    let value = cleanText(payload[key], key === "reason" ? MAX_REASON : MAX_TEXT);
+    if (value && VN_DATE_FIELDS.has(key)) value = toVnDate(value) || value;
     if (value) metadata[key] = value;
   }
   return { columns, metadata };
@@ -100,12 +107,36 @@ function forbiddenError(message) {
   return err;
 }
 
+async function nextRequestId() {
+  const prisma = database.getPrisma();
+  let max = 0;
+  const prefix = "YC-";
+  const scan = (raw) => {
+    const s = String(raw || "").trim().toUpperCase();
+    if (!s.startsWith(prefix)) return;
+    const n = Number(s.slice(prefix.length));
+    if (Number.isInteger(n) && n > max) max = n;
+  };
+  if (prisma) {
+    const rows = await prisma.request
+      .findMany({ where: { id: { startsWith: prefix } }, select: { id: true } })
+      .catch(() => []);
+    rows.forEach((r) => scan(r.id));
+  } else {
+    memoryRequests.forEach((r) => scan(r.id));
+  }
+  return `${prefix}${String(max + 1).padStart(4, "0")}`;
+}
+
 async function create(data, notification = null) {
   const prisma = database.getPrisma();
   let created;
+  if (!data.id) {
+    data.id = await nextRequestId();
+  }
   if (!prisma) {
     created = {
-      id: data.id || `req-${Date.now()}`,
+      id: data.id,
       status: "pending",
       ...data,
       createdAt: new Date(),
@@ -155,14 +186,22 @@ async function update(id, data) {
 }
 
 async function deleteById(id) {
+  const row = await findById(id);
+  if (!row) return false;
   const prisma = database.getPrisma();
   if (!prisma) {
     const idx = memoryRequests.findIndex((r) => r.id === id);
     if (idx === -1) return false;
     memoryRequests.splice(idx, 1);
-    return true;
+  } else {
+    await prisma.request.delete({ where: { id } });
   }
-  await prisma.request.delete({ where: { id } });
+  // Xóa ảnh đính kèm best-effort; ảnh mồ côi còn lại đã có scan-orphans đối soát.
+  if (row.attachmentUrl) {
+    FileService.deleteByUrl(row.attachmentUrl).catch((e) => {
+      console.warn("[integration-service] Xóa ảnh đính kèm thất bại:", e.message);
+    });
+  }
   return true;
 }
 

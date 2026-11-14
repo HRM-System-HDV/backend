@@ -1,27 +1,12 @@
 "use strict";
 
+const { toVnDate, todayVn } = require("../utils/dateFormat");
+
+// Ngày đăng luôn DD/MM/YYYY; không truyền thì lấy hôm nay.
 function formatDateVN(dateInput) {
-  if (!dateInput) {
-    const now = new Date();
-    const d = String(now.getDate()).padStart(2, "0");
-    const m = String(now.getMonth() + 1).padStart(2, "0");
-    const y = now.getFullYear();
-    return `${d}/${m}/${y}`;
-  }
-  const str = String(dateInput).trim();
-  const slashMatch = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (slashMatch) {
-    return `${slashMatch[1].padStart(2, "0")}/${slashMatch[2].padStart(2, "0")}/${slashMatch[3]}`;
-  }
-  const hyphenMatch = str.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
-  if (hyphenMatch) {
-    return `${hyphenMatch[1].padStart(2, "0")}/${hyphenMatch[2].padStart(2, "0")}/${hyphenMatch[3]}`;
-  }
-  const isoMatch = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
-  if (isoMatch) {
-    return `${isoMatch[3].padStart(2, "0")}/${isoMatch[2].padStart(2, "0")}/${isoMatch[1]}`;
-  }
-  return str;
+  if (!dateInput) return todayVn();
+  const normalized = toVnDate(dateInput);
+  return normalized || String(dateInput).trim();
 }
 
 
@@ -94,6 +79,7 @@ async function updateNews(req, res, next) {
 
     const payload = { ...req.body };
     delete payload.author;
+    if (payload.date !== undefined) payload.date = formatDateVN(payload.date);
     const updated = await NewsService.update(id, payload);
     return res.status(200).json({
       data: updated,

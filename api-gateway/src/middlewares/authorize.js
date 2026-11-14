@@ -35,6 +35,10 @@ const rules = [
   { methods: ["GET"], path: /^\/api\/backlog(\/|$)/, roles: MANAGERS },
   // Xóa nhật ký hoạt động là thao tác quản trị; ghi nhật ký thì mọi vai trò.
   { methods: ["DELETE"], path: /^\/api\/backlog(\/|$)/, roles: ["admin"] },
+  // Lưu trữ dữ liệu cũ: xem, chạy, khôi phục đều chỉ admin.
+  { methods: ["GET", ...WRITE], path: /^\/api\/archive(\/|$)/, roles: ["admin"] },
+  // Đọc file ảnh thì mọi vai trò đăng nhập; xóa/quét mồ côi chỉ admin.
+  { methods: ["POST", "DELETE"], path: /^\/api\/files(\/|$)/, roles: ["admin"] },
 ];
 
 function createAuthorizeMiddleware(options = {}) {
