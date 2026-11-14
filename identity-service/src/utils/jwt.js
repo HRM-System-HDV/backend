@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const config = require("../config");
 
@@ -8,7 +9,7 @@ function signAccessToken(payload) {
 }
 
 function signRefreshToken(payload) {
-  return jwt.sign({ ...payload, type: "refresh" }, config.jwtSecret, {
+  return jwt.sign({ ...payload, type: "refresh", jti: crypto.randomUUID() }, config.jwtSecret, {
     expiresIn: config.jwtRefreshExpiresIn,
   });
 }

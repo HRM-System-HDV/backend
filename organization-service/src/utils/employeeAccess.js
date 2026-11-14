@@ -1,98 +1,46 @@
 "use strict";
-
-const { ForbiddenError } = require("./errors");
-
-// Danh tính do gateway chuyển xuống sau khi đã verify JWT và xóa header giả mạo.
-// Service chỉ tin các header này khi nằm sau gateway.
-const SENSITIVE_FIELDS = [
-  "cccd", "issueDate", "issuePlace", "cccdFront", "cccdBack",
-  "baseSalary", "salaryType", "hourlySalary",
-  "bankName", "bankAccountNumber", "bankAccountName",
-  "phone", "birthDate", "province", "ward", "street",
-];
-
+const config = require("../config");
+const { ForbiddenError, UnauthorizedError } = require("./errors");
+const selfFields = ["name","phone","gender","birthDate","province","ward","street","cccd","issueDate","issuePlace","cccdFront","cccdBack","avatar","bankName","bankAccountNumber","bankAccountName"];
 function callerFrom(req) {
   return {
-    userId: req.headers["x-user-id"] || null,
-    email: String(req.headers["x-user-email"] || "").toLowerCase(),
-    role: req.headers["x-user-role"] || "staff",
-    branchSlug: req.headers["x-branch-slug"] || null,
+    userId: req.get("x-user-id") || null,
+    employeeId: req.get("x-employee-id") || null,
+    branchId: req.get("x-branch-id") || null,
+    email: (req.get("x-user-email") || "").toLowerCase(),
+    role: req.get("x-user-role") || null,
+    internal: Boolean(config.internalToken) && req.get("x-internal-token") === config.internalToken,
   };
 }
-
-function isSelf(row, caller) {
-  if (!row) return false;
-  if (caller.userId && String(row.id) === String(caller.userId)) return true;
-  return Boolean(caller.email) && String(row.email || "").toLowerCase() === caller.email;
+function assertAuthenticated(caller) {
+  // Chưa xác thực => 401 UNAUTHORIZED; đã xác thực nhưng thiếu quyền => 403 FORBIDDEN.
+  if (caller?.internal || (caller?.userId && ["admin","manager","staff"].includes(caller.role))) return;
+  throw new UnauthorizedError("Chưa xác thực, vui lòng đăng nhập để tiếp tục");
 }
-
-function canSeeSensitive(row, caller) {
-  return caller.role === "admin" || caller.role === "manager" || isSelf(row, caller);
-}
-
-// Nhân viên thường chỉ thấy danh bạ đồng nghiệp (tên, email, phòng ban) để
-// đổi ca / nhờ làm thay; CCCD, lương, tài khoản ngân hàng phải ẩn.
-function redactEmployee(row, caller) {
-  if (!row || canSeeSensitive(row, caller)) return row;
-  const out = { ...row };
-  for (const field of SENSITIVE_FIELDS) delete out[field];
-  return out;
-}
-
-// Admin xem mọi chi nhánh. Quản lý/nhân viên chỉ xem chi nhánh của mình;
-// không có chi nhánh thì chỉ xem đúng hồ sơ của chính mình.
-function scopeEmployeeQuery(query, caller) {
-  if (caller.role === "admin") return { ...query };
-  if (caller.branchSlug) return { ...query, branchSlug: caller.branchSlug };
-  const self = {};
-  if (caller.userId) self.id = caller.userId;
-  else if (caller.email) self.email = caller.email;
-  else self.id = "__khong_co_ho_so__";
-  return { ...self };
-}
-
-function assertCanReadEmployee(row, caller) {
-  if (caller.role === "admin") return;
-  if (isSelf(row, caller)) return;
-  if (caller.role === "manager" && caller.branchSlug && row.branchSlug === caller.branchSlug) return;
-  if (caller.branchSlug && row.branchSlug === caller.branchSlug) return;
+function isSelf(row, caller) { return Boolean(caller.employeeId) && row.id === caller.employeeId; }
+function assertEmployeeRead(row, caller) {
+  assertAuthenticated(caller);
+  if (caller.internal || caller.role === "admin" || isSelf(row, caller) || (caller.role === "manager" && caller.branchId && row.branchId === caller.branchId)) return;
   throw new ForbiddenError("Bạn không có quyền xem hồ sơ nhân sự này");
 }
-
-// Nhân viên tự sửa được hồ sơ cá nhân, nhưng không được tự nâng vai trò, đổi
-// lương, đổi chi nhánh hay đổi email đăng nhập.
-const SELF_EDITABLE_FIELDS = [
-  "name", "phone", "gender", "birthDate", "province", "ward", "street",
-  "cccd", "issueDate", "issuePlace", "cccdFront", "cccdBack", "avatar",
-  "bankName", "bankAccountNumber", "bankAccountName",
-];
-
-function assertCanWriteEmployee(row, caller, body) {
-  if (caller.role === "admin") return body;
-  if (caller.role === "manager") {
-    if (isSelf(row, caller)) return body;
-    if (caller.branchSlug && row.branchSlug === caller.branchSlug) return body;
-    throw new ForbiddenError("Quản lý chỉ sửa được hồ sơ thuộc chi nhánh của mình");
-  }
-  if (!isSelf(row, caller)) {
-    throw new ForbiddenError("Bạn chỉ được sửa hồ sơ của chính mình");
-  }
-  const filtered = {};
-  for (const field of SELF_EDITABLE_FIELDS) {
-    if (body[field] !== undefined) filtered[field] = body[field];
-  }
-  const dropped = Object.keys(body).filter((k) => !(k in filtered));
-  if (dropped.length) {
-    throw new ForbiddenError(`Nhân viên không được sửa các trường: ${dropped.join(", ")}`);
-  }
-  return filtered;
+function employeeScope(query, caller) {
+  assertAuthenticated(caller);
+  if (caller.internal || caller.role === "admin") return {...query};
+  if (caller.role === "manager" && caller.branchId) return {...query, branchId:caller.branchId};
+  return {...query, id: caller.employeeId || "00000000-0000-4000-8000-000000000000"};
 }
-
-module.exports = {
-  callerFrom,
-  isSelf,
-  redactEmployee,
-  scopeEmployeeQuery,
-  assertCanReadEmployee,
-  assertCanWriteEmployee,
-};
+function assertEmployeeWrite(existing, payload, caller, creating = false) {
+  assertAuthenticated(caller);
+  if (caller.internal && !caller.userId) throw new ForbiddenError("Kết nối nội bộ chỉ được đọc dữ liệu nhân sự");
+  if (caller.role === "admin") return payload;
+  if (caller.role === "manager") {
+    if (!caller.branchId || (existing && existing.branchId !== caller.branchId) || (payload.branchId !== undefined && payload.branchId !== caller.branchId)) throw new ForbiddenError("Quản lý chỉ được thao tác nhân sự chi nhánh của mình");
+    if (!creating && payload.email !== undefined && payload.email !== existing.email) throw new ForbiddenError("Chỉ admin được đổi email đăng nhập");
+    return creating ? {...payload, branchId:caller.branchId} : payload;
+  }
+  if (!creating && existing && isSelf(existing, caller) && Object.keys(payload).every(key => selfFields.includes(key))) return payload;
+  throw new ForbiddenError("Bạn không có quyền sửa thông tin nhân sự này");
+}
+function assertAdmin(caller) { assertAuthenticated(caller); if (caller.role !== "admin") throw new ForbiddenError("Chức năng này chỉ dành cho admin"); }
+function assertManager(caller) { assertAuthenticated(caller); if (!["admin","manager"].includes(caller.role)) throw new ForbiddenError("Chức năng này dành cho quản lý hoặc admin"); }
+module.exports = { callerFrom, assertAuthenticated, isSelf, assertEmployeeRead, employeeScope, assertEmployeeWrite, assertAdmin, assertManager };

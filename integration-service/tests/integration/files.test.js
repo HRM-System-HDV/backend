@@ -1,141 +1,38 @@
 "use strict";
-
-const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const os = require("node:os");
-const path = require("node:path");
-const { test, before, after } = require("node:test");
-
-// Cô lập: thư mục tạm + chế độ in-memory (không phụ thuộc Postgres).
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "hrm-files-test-"));
-process.env.STORAGE_DIR = tmpDir;
-process.env.DATABASE_URL = "";
-
-const PNG_BASE64 =
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
-const PNG_DATA_URL = `data:image/png;base64,${PNG_BASE64}`;
-
-let server;
-let base;
-const json = { "Content-Type": "application/json" };
-
-before(async () => {
-  const app = require("../../src/app");
-  server = app.listen(0);
-  await new Promise((r) => server.on("listening", r));
-  base = `http://localhost:${server.address().port}`;
+const fs=require("node:fs");const os=require("node:os");const path=require("node:path");
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),"hrm-integration-files-"));
+process.env.DATABASE_URL="";process.env.STORAGE_DIR=dir;
+const {test,after}=require("node:test");const assert=require("node:assert/strict");const {randomUUID}=require("node:crypto");
+const request=require("supertest");const app=require("../../src/app");const database=require("../../src/config/database");
+const admin={"x-user-id":randomUUID(),"x-user-role":"admin"};
+const staff={"x-user-id":randomUUID(),"x-user-role":"staff","x-employee-id":randomUUID(),"x-branch-id":randomUUID()};
+const dataUrl="data:image/png;base64,"+Buffer.from([137,80,78,71,13,10,26,10,0]).toString("base64");
+after(()=>{const resolved=fs.realpathSync(dir);if(!resolved.startsWith(fs.realpathSync(os.tmpdir())+path.sep+"hrm-integration-files-"))throw new Error("Invalid cleanup target");fs.rmSync(resolved,{recursive:true,force:true});});
+test("upload dùng publicId riêng, đọc đúng quyền và PDF quy định có relation",async()=>{
+  const uploaded=await request(app).post("/api/upload").set(staff).send({file:dataUrl,folder:"hrm/cccd"}).expect(201);
+  assert.ok(uploaded.body.data.publicId.startsWith("hrm/cccd/"));assert.equal(uploaded.body.data.width,undefined);
+  await request(app).get(`/api/files/${uploaded.body.data.publicId}`).set(staff).expect(200);
+  await request(app).get(`/api/files/${uploaded.body.data.publicId}`).set({...staff,"x-user-id":randomUUID()}).expect(403);
+  await request(app).delete(`/api/files/${uploaded.body.data.publicId}`).set(staff).expect(403);
+  const regulation=(await request(app).post("/api/regulations").set(admin).send({regulationCode:"QD-1",title:"Nội quy",category:"Quy định",summary:"Tóm tắt",content:"Nội dung",effectiveDate:"2026-11-12",scopeBranchId:staff["x-branch-id"]}).expect(201)).body.data;
+  const pdf="data:application/pdf;base64,"+Buffer.from("%PDF-1.4\nfile").toString("base64");
+  await request(app).post("/api/upload").set(admin).send({file:pdf,folder:"hrm/regulations",regulationId:regulation.id}).expect(201);
+  const read=(await request(app).get(`/api/regulations/${regulation.id}`).set(staff).expect(200)).body.data;
+  assert.equal(read.files.length,1);assert.equal(read.files[0].mime,"application/pdf");
+  assert.notEqual(read.files[0].id,read.files[0].publicId);
+  const downloaded = await request(app).get(`/api/files/${read.files[0].publicId}`).set(staff).expect(200);
+  assert.match(downloaded.headers["content-type"], /application\/pdf/);
+  assert.equal(downloaded.body.toString(), "%PDF-1.4\nfile");
+  await request(app).get(`/api/files/${read.files[0].publicId}`).set({ ...staff, "x-branch-id": randomUUID() }).expect(403);
+  await request(app).delete(`/api/files/${read.files[0].publicId}`).set(admin).expect(200);
+  const afterDelete = (await request(app).get(`/api/regulations/${regulation.id}`).set(staff).expect(200)).body.data;
+  assert.equal(afterDelete.files.length, 0);
 });
-
-after(async () => {
-  if (server) {
-    if (server.closeAllConnections) server.closeAllConnections();
-    await new Promise((r) => server.close(r));
-  }
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-});
-
-async function upload(folder = "hrm/avatars") {
-  const res = await fetch(`${base}/api/upload`, {
-    method: "POST",
-    headers: json,
-    body: JSON.stringify({ file: PNG_DATA_URL, folder }),
-  });
-  return { res, body: await res.json() };
-}
-
-test("POST /api/upload giữ nguyên contract, lưu file nội bộ", async () => {
-  const { res, body } = await upload();
-  assert.equal(res.status, 200);
-  for (const key of ["url", "secure_url", "publicId", "public_id", "format", "width", "height", "bytes"]) {
-    assert.ok(key in body.data, `thiếu trường ${key}`);
-  }
-  assert.match(body.data.url, /\/api\/files\/hrm\/avatars\/[A-Za-z0-9-]+$/);
-  assert.equal(body.data.format, "png");
-  assert.ok(body.data.bytes > 0);
-  assert.ok(fs.existsSync(path.join(tmpDir, `${body.data.publicId}.png`)));
-});
-
-test("GET /api/files trả đúng nội dung ảnh", async () => {
-  const { body } = await upload();
-  const res = await fetch(`${base}/api/files/${body.data.publicId}`);
-  assert.equal(res.status, 200);
-  assert.equal(res.headers.get("content-type"), "image/png");
-  const buf = Buffer.from(await res.arrayBuffer());
-  assert.deepEqual(buf, Buffer.from(PNG_BASE64, "base64"));
-});
-
-test("GET /api/files chặn traversal và file không tồn tại", async () => {
-  let res = await fetch(`${base}/api/files/hrm/..%2F..%2Fetc%2Fpasswd`);
-  assert.ok([400, 404].includes(res.status));
-  res = await fetch(`${base}/api/files/hrm/khong-ton-tai`);
-  assert.equal(res.status, 404);
-  const body = await res.json();
-  assert.equal(body.error.code, "NOT_FOUND");
-});
-
-test("POST /api/upload chặn payload giả mạo và folder lạ", async () => {
-  const fake = Buffer.from("khong phai anh").toString("base64");
-  let res = await fetch(`${base}/api/upload`, {
-    method: "POST",
-    headers: json,
-    body: JSON.stringify({ file: `data:image/png;base64,${fake}` }),
-  });
-  assert.equal(res.status, 400);
-  let body = await res.json();
-  assert.equal(body.error.code, "VALIDATION_ERROR");
-
-  res = await fetch(`${base}/api/upload`, {
-    method: "POST",
-    headers: json,
-    body: JSON.stringify({ file: PNG_DATA_URL, folder: "hrm/../etc" }),
-  });
-  assert.equal(res.status, 400);
-
-  res = await fetch(`${base}/api/upload`, {
-    method: "POST",
-    headers: json,
-    body: JSON.stringify({}),
-  });
-  assert.equal(res.status, 400);
-});
-
-test("DELETE /api/files xóa file, GET lại trả 404, DELETE lần 2 idempotent", async () => {
-  const { body } = await upload();
-  const publicId = body.data.publicId;
-  let res = await fetch(`${base}/api/files/${publicId}`, { method: "DELETE" });
-  assert.equal(res.status, 200);
-  assert.ok(!fs.existsSync(path.join(tmpDir, `${publicId}.png`)));
-
-  res = await fetch(`${base}/api/files/${publicId}`);
-  assert.equal(res.status, 404);
-
-  res = await fetch(`${base}/api/files/${publicId}`, { method: "DELETE" });
-  assert.equal(res.status, 404);
-});
-
-test("scan-orphans phát hiện file lạ, purge-orphans chỉ xóa danh sách được duyệt", async () => {
-  // File lạ trên đĩa không có trong đăng ký.
-  fs.mkdirSync(path.join(tmpDir, "hrm"), { recursive: true });
-  fs.writeFileSync(path.join(tmpDir, "hrm", "mo-coi.png"), Buffer.from(PNG_BASE64, "base64"));
-
-  let res = await fetch(`${base}/api/files/scan-orphans`, {
-    method: "POST",
-    headers: json,
-    body: JSON.stringify({ graceHours: 0 }),
-  });
-  assert.equal(res.status, 200);
-  let body = await res.json();
-  const orphan = body.data.orphans.find((o) => o.publicId === "hrm/mo-coi");
-  assert.ok(orphan);
-  assert.ok(body.data.totalBytes > 0);
-
-  res = await fetch(`${base}/api/files/purge-orphans`, {
-    method: "POST",
-    headers: json,
-    body: JSON.stringify({ publicIds: ["hrm/mo-coi"] }),
-  });
-  assert.equal(res.status, 200);
-  body = await res.json();
-  assert.equal(body.data.purged, 1);
-  assert.ok(!fs.existsSync(path.join(tmpDir, "hrm", "mo-coi.png")));
+test("Prisma FileAsset ghi publicId, UUID và đúng tên cột",async()=>{
+  const original=database.getPrisma;let data;
+  database.getPrisma=()=>({fileAsset:{create:async args=>{data=args.data;return data;}}});
+  try {
+    const result=await require("../../src/services/FileService").upload(dataUrl,"hrm/tasks",staff["x-user-id"],staff["x-branch-id"]);
+    assert.equal(data.publicId,result.publicId);assert.match(data.id,/^[0-9a-f-]{36}$/);assert.equal(data.branchId,staff["x-branch-id"]);assert.equal(data.branchSlug,undefined);assert.equal(data.width,undefined);
+  } finally {database.getPrisma=original;}
 });

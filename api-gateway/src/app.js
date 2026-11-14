@@ -7,9 +7,12 @@ const morgan = require("morgan");
 const { createProxyMiddleware } = require("http-proxy-middleware");
 const config = require("./config");
 const { errorHandler } = require("./middlewares/errorHandler");
+const { correlationMiddleware } = require("./middlewares/logging");
 const { createAuthMiddleware } = require("./middlewares/auth");
 const { createAuthorizeMiddleware } = require("./middlewares/authorize");
 const { createRateLimitMiddleware } = require("./middlewares/rateLimit");
+const { createClientContextMiddleware } = require("./middlewares/clientContext");
+const { sendError } = require("./utils/soapFault");
 
 const app = express();
 
@@ -17,6 +20,11 @@ app.use(morgan("dev"));
 // CORS cho phiên cookie hrm-session: chỉ định origin cụ thể, không dùng "*".
 app.use(cors({ origin: config.corsOrigin, credentials: true }));
 app.use(cookieParser());
+app.use(correlationMiddleware);
+// Chuẩn hóa nền tảng + IP thật của client TRƯỚC khi rate-limit và proxy:
+// mọi header x-client-platform / x-client-ip / x-forwarded-for do client gửi
+// đều bị loại bỏ (clientContext), Gateway tự tính rồi gắn lại xuống hạ tầng.
+app.use(createClientContextMiddleware());
 
 app.get("/health", (_req, res) => {
   res.status(200).json({ status: "ok", service: config.serviceName, time: new Date().toISOString() });
@@ -41,23 +49,34 @@ function proxyTo(pathFilter, target, label) {
       proxyReq: (proxyReq, req) => {
         // Client có thể tự gửi x-user-* để giả danh, nhất là ở tuyến public nơi
         // req.user chưa được set. Luôn xóa trước rồi mới gắn danh tính đã verify.
-        for (const h of ["x-user-id", "x-user-email", "x-user-role", "x-branch-slug"]) {
+        for (const h of Object.keys(req.headers).filter((h) =>
+          h.startsWith("x-user-") || ["x-employee-id", "x-branch-id", "x-branch-slug", "x-internal-token"].includes(h))) {
           proxyReq.removeHeader(h);
         }
+        // Nền tảng và IP: chỉ Gateway được quyết định. Xóa bản client gửi
+        // (đã bị xóa ở clientContext) rồi gắn bản đã chuẩn hóa.
+        for (const h of ["x-client-platform", "x-client-ip", "x-forwarded-for"]) {
+          proxyReq.removeHeader(h);
+        }
+        proxyReq.setHeader("x-client-platform", req.clientPlatform || "mobile");
+        if (req.clientIp) proxyReq.setHeader("x-client-ip", req.clientIp);
         // Chuyển danh tính đã verify sang service phía sau, service không cần re-verify.
         if (req.user) {
           if (req.user.userId) proxyReq.setHeader("x-user-id", String(req.user.userId));
+          if (req.user.employeeId) proxyReq.setHeader("x-employee-id", String(req.user.employeeId));
           if (req.user.email) proxyReq.setHeader("x-user-email", String(req.user.email));
+          if (req.user.name) proxyReq.setHeader("x-user-name", encodeURIComponent(req.user.name));
           if (req.user.role) proxyReq.setHeader("x-user-role", String(req.user.role));
-          if (req.user.branchSlug) proxyReq.setHeader("x-branch-slug", String(req.user.branchSlug));
+          if (req.user.branchId) proxyReq.setHeader("x-branch-id", String(req.user.branchId));
+        }
+        if (req.correlationId) {
+          proxyReq.setHeader("x-correlation-id", req.correlationId);
         }
       },
-      error: (err, _req, res) => {
+      error: (err, req, res) => {
         console.warn(`[gateway] ${label} lỗi:`, err.message);
         if (!res.headersSent) {
-          res.status(502).json({
-            error: { code: "BAD_GATEWAY", message: `Không kết nối được ${label}` },
-          });
+          sendError(req, res, 502, "BAD_GATEWAY", `Không kết nối được ${label}`);
         }
       },
     },
@@ -69,6 +88,7 @@ function proxyTo(pathFilter, target, label) {
 app.use(proxyTo("/api/auth", config.targets.identity, "identity-service"));
 app.use(proxyTo("/api/branches", config.targets.organization, "organization-service"));
 app.use(proxyTo("/api/departments", config.targets.organization, "organization-service"));
+app.use(proxyTo("/api/positions", config.targets.organization, "organization-service"));
 app.use(proxyTo("/api/employees", config.targets.organization, "organization-service"));
 app.use(proxyTo("/api/shifts", config.targets.work, "work-service"));
 app.use(proxyTo("/api/shift-templates", config.targets.work, "work-service"));
@@ -86,11 +106,9 @@ app.use(proxyTo("/api/soap-config", config.targets.integration, "integration-ser
 app.use(proxyTo("/api/upload", config.targets.integration, "integration-service"));
 app.use(proxyTo("/api/backlog", config.targets.integration, "integration-service"));
 app.use(proxyTo("/api/files", config.targets.integration, "integration-service"));
-app.use(proxyTo("/api/archive/work", config.targets.work, "work-service"));
-app.use(proxyTo("/api/archive/integration", config.targets.integration, "integration-service"));
 
-app.use((_req, res) => {
-  res.status(404).json({ error: { code: "NOT_FOUND", message: "Không tìm thấy tài nguyên" } });
+app.use((req, res) => {
+  sendError(req, res, 404, "NOT_FOUND", "Không tìm thấy tài nguyên");
 });
 
 app.use(errorHandler);

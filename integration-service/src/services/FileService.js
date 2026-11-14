@@ -7,13 +7,6 @@ const database = require("../config/database");
 const storage = require("../utils/localStorage");
 const { validateFolder, parseDataUrl } = require("../validators/fileValidator");
 
-let sizeOf = null;
-try {
-  sizeOf = require("image-size");
-} catch {
-  sizeOf = null;
-}
-
 // Chế độ không DB: đăng ký file trong bộ nhớ để dev vẫn upload được.
 const memoryAssets = new Map();
 
@@ -42,13 +35,13 @@ function assertPublicId(publicId) {
 async function findAsset(publicId) {
   const prisma = database.getPrisma();
   if (!prisma) return memoryAssets.get(publicId) || null;
-  return prisma.fileAsset.findUnique({ where: { id: publicId } });
+  return prisma.fileAsset.findUnique({ where: { publicId } });
 }
 
 async function createAsset(row) {
   const prisma = database.getPrisma();
   if (!prisma) {
-    memoryAssets.set(row.id, row);
+    memoryAssets.set(row.publicId, row);
     return row;
   }
   return prisma.fileAsset.create({ data: row });
@@ -62,38 +55,28 @@ async function markDeleted(publicId) {
     if (row) row.deletedAt = deletedAt;
     return;
   }
-  await prisma.fileAsset.updateMany({ where: { id: publicId }, data: { deletedAt } });
+  await prisma.fileAsset.updateMany({ where: { publicId }, data: { deletedAt } });
 }
 
-function dimensionsOf(buffer) {
-  if (!sizeOf) return { width: 0, height: 0 };
-  try {
-    const dim = sizeOf(buffer);
-    return { width: dim.width || 0, height: dim.height || 0 };
-  } catch {
-    return { width: 0, height: 0 };
-  }
-}
-
-async function upload(dataUrl, folder, uploadedBy = null) {
+async function upload(dataUrl, folder, uploadedBy = null, branchId = null, regulationId = null) {
   const safeFolder = validateFolder(folder);
   const { mime, buffer, ext, format } = parseDataUrl(dataUrl);
   const publicId = `${safeFolder}/${crypto.randomUUID()}`;
   const storagePath = `${publicId}.${ext}`;
   await storage.saveBuffer(storagePath, buffer);
-  const { width, height } = dimensionsOf(buffer);
-  await createAsset({
-    id: publicId,
+  try { await createAsset({
+    id: crypto.randomUUID(),
+    publicId,
     folder: safeFolder,
     storagePath,
     mime,
     bytes: buffer.length,
-    width,
-    height,
     uploadedBy: uploadedBy || null,
+    branchId: branchId || null,
+    regulationId: regulationId || null,
     createdAt: new Date(),
     deletedAt: null,
-  });
+  }); } catch(error) { await storage.unlink(storagePath); throw error; }
   const url = `${config.publicBaseUrl}/api/files/${publicId}`;
   return {
     url,
@@ -101,8 +84,6 @@ async function upload(dataUrl, folder, uploadedBy = null) {
     publicId,
     public_id: publicId,
     format,
-    width,
-    height,
     bytes: buffer.length,
   };
 }
@@ -145,6 +126,11 @@ async function deleteByUrl(url) {
   return deleteByPublicId(publicId);
 }
 
+async function findForRegulation(regulationId) {
+  const prisma=database.getPrisma();
+  return prisma ? prisma.fileAsset.findMany({where:{regulationId,deletedAt:null}}) : [...memoryAssets.values()].filter(row=>row.regulationId===regulationId && !row.deletedAt);
+}
+
 async function scanOrphans(graceHours = 24) {
   const hours = Number(graceHours);
   if (!Number.isFinite(hours) || hours < 0 || hours > 24 * 30) {
@@ -156,12 +142,7 @@ async function scanOrphans(graceHours = 24) {
   for (const file of files) {
     if (file.mtimeMs > cutoffMs) continue;
     const publicId = file.relPath.replace(/\.[A-Za-z0-9]+$/, "");
-    let asset = null;
-    try {
-      asset = await findAsset(publicId);
-    } catch {
-      asset = null;
-    }
+    const asset = await findAsset(publicId);
     if (!asset || asset.deletedAt) {
       orphans.push({ publicId, storagePath: file.relPath, bytes: file.bytes });
     }
@@ -179,6 +160,7 @@ async function purgeOrphans(publicIds) {
     const id = assertPublicId(raw);
     const asset = await findAsset(id);
     if (asset) {
+      if (!asset.deletedAt) throw validationError("Tệp vẫn đang được sử dụng, không phải tệp mồ côi");
       const result = await deleteByPublicId(id);
       if (result.deleted) purged += 1;
       continue;
@@ -196,6 +178,7 @@ async function purgeOrphans(publicIds) {
 }
 
 module.exports = {
+  findForRegulation,
   upload,
   getByPublicId,
   deleteByPublicId,

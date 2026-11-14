@@ -2,6 +2,14 @@
 
 require("dotenv").config();
 
+if (process.env.NODE_ENV === "production") {
+  const internalToken = process.env.INTERNAL_API_TOKEN;
+  if (!internalToken || internalToken.startsWith("dev_only_")) {
+    console.error("[FATAL] Production startup validation failed: INTERNAL_API_TOKEN is missing or using insecure default value.");
+    process.exit(1);
+  }
+}
+
 module.exports = {
   port: parseInt(process.env.PORT || "4002", 10),
   serviceName: process.env.SERVICE_NAME || "organization-service",

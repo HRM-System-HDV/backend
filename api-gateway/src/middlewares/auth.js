@@ -6,6 +6,7 @@
 // Tuyến công khai (login/refresh/forgot-password/health/WSDL) được bỏ qua.
 const jwt = require("jsonwebtoken");
 const config = require("../config");
+const { sendError } = require("../utils/soapFault");
 
 function createAuthMiddleware(options = {}) {
   const secret = options.secret || config.jwtSecret;
@@ -26,28 +27,32 @@ function createAuthMiddleware(options = {}) {
     const fromHeader = header.startsWith("Bearer ") ? header.slice(7) : null;
     const token = fromCookie || fromHeader;
     if (!token) {
-      return res.status(401).json({
-        error: { code: "UNAUTHORIZED", message: "Vui lòng đăng nhập để tiếp tục" },
-      });
+      return sendError(req, res, 401, "UNAUTHORIZED", "Vui lòng đăng nhập để tiếp tục");
     }
     try {
       const payload = jwt.verify(token, secret);
       if (payload.type === "refresh") {
-        return res.status(401).json({
-          error: { code: "UNAUTHORIZED", message: "Phiên đăng nhập không hợp lệ" },
-        });
+        return sendError(req, res, 401, "UNAUTHORIZED", "Phiên đăng nhập không hợp lệ");
+      }
+      const role = payload.role || payload.systemRole;
+      if (!payload.userId || !["admin", "manager", "staff"].includes(role)) {
+        return sendError(req, res, 401, "UNAUTHORIZED", "Danh tính đăng nhập không hợp lệ");
+      }
+      if (role === "staff" && (fromCookie || payload.clientPlatform !== "mobile" || req.clientPlatform !== "mobile")) {
+        return sendError(req, res, 403, "FORBIDDEN", "Nhân viên chỉ được đăng nhập trên ứng dụng Mobile");
       }
       req.user = {
         userId: payload.userId,
+        employeeId: payload.employeeId || null,
         email: payload.email,
-        role: payload.role,
-        branchSlug: payload.branchSlug,
+        name: payload.name || null,
+        role,
+        branchId: payload.branchId || null,
+        clientPlatform: payload.clientPlatform || "web",
       };
       return next();
     } catch (e) {
-      return res.status(401).json({
-        error: { code: "UNAUTHORIZED", message: "Phiên đăng nhập đã hết hạn" },
-      });
+      return sendError(req, res, 401, "UNAUTHORIZED", "Phiên đăng nhập đã hết hạn");
     }
   };
 }

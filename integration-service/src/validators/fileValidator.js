@@ -5,6 +5,7 @@ const config = require("../config");
 const FOLDER_RE = /^hrm(\/[a-z0-9_-]+){0,2}$/;
 
 const MIME_TYPES = {
+  "application/pdf": {ext:"pdf",format:"pdf",matches:b=>b.length>=5 && b.toString("ascii",0,5)==="%PDF-"},
   "image/jpeg": {
     ext: "jpg",
     format: "jpg",
@@ -59,7 +60,7 @@ function parseDataUrl(input, maxBytes = config.maxUploadBytes) {
   const mime = match[1].toLowerCase();
   const spec = MIME_TYPES[mime];
   if (!spec) {
-    throw validationError("Định dạng ảnh không được hỗ trợ (chỉ nhận JPEG, PNG, WEBP)");
+    throw validationError("Định dạng tệp không được hỗ trợ (JPEG, PNG, WEBP, PDF)");
   }
   const base64 = match[2].replace(/\s/g, "");
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) {

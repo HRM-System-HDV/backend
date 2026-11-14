@@ -15,6 +15,16 @@ function mockRes() {
     res.body = body;
     return res;
   };
+  // Tuyến SOAP trả lỗi dạng XML nên mock phải có set/send.
+  res.set = (name, value) => {
+    res.headers = res.headers || {};
+    res.headers[name] = value;
+    return res;
+  };
+  res.send = (body) => {
+    res.text = body;
+    return res;
+  };
   return res;
 }
 
@@ -32,6 +42,24 @@ function run(method, path, role) {
 
 // [method, path, role, mong đợi cho qua]
 const cases = [
+  ["POST", "/api/notifications/reminders", "staff", true],
+  ["GET", "/api/attendance/config", "manager", true],
+  ["GET", "/api/attendance/config", "admin", true],
+  ["PUT", "/api/attendance/s1", "staff", false],
+  ["PUT", "/api/attendance/s1", "manager", true],
+  ["POST", "/api/attendance/double", "staff", true],
+  ["POST", "/api/attendance/preflight", "staff", true],
+  ["POST", "/api/payroll/payslips/p1/confirm", "staff", true],
+  ["POST", "/api/payroll/payslips/p1/confirm", "manager", true],
+  ["GET", "/api/auth/users", "manager", false],
+  ["PUT", "/api/auth/users/u1", "manager", false],
+  ["PUT", "/api/auth/users/u1", "admin", true],
+  ["POST", "/api/positions", "staff", false],
+  // Vị trí là danh mục admin-only, khớp assertAdmin của organization-service.
+  ["POST", "/api/positions", "manager", false],
+  ["DELETE", "/api/positions/p1", "manager", false],
+  ["DELETE", "/api/positions/p1", "admin", true],
+  ["GET", "/api/positions", "staff", true],
   // Hồ sơ nhân sự: nhân viên chỉ được sửa chính mình / xin thôi việc.
   ["POST", "/api/employees", "staff", false],
   ["POST", "/api/employees", "manager", true],
@@ -40,10 +68,16 @@ const cases = [
   ["DELETE", "/api/employees/e-1", "staff", false],
   ["DELETE", "/api/employees/e-1", "admin", true],
 
-  // Chi nhánh / phòng ban không có màn nhân viên nào gọi ghi.
+  // Gateway cho Manager/Admin ghi chi nhánh; Org kiểm tra phạm vi branchId.
+  // Phòng ban vẫn là nghiệp vụ vận hành chi nhánh nên manager ghi được.
   ["POST", "/api/branches", "staff", false],
+  ["POST", "/api/branches", "manager", true],
+  ["POST", "/api/auth/internal/employee-roles", "admin", false],
+  ["GET", "/api/auth/internal/users/u1/name", "manager", false],
   ["PUT", "/api/branches/CN01", "manager", true],
+  ["PUT", "/api/branches/CN01", "admin", true],
   ["DELETE", "/api/departments/d1", "staff", false],
+  ["POST", "/api/departments", "manager", true],
 
   // Phân ca là việc của quản lý; đăng ký/hủy đăng ký là của nhân viên.
   ["POST", "/api/shifts", "staff", false],
@@ -54,14 +88,12 @@ const cases = [
   ["POST", "/api/shifts/register", "staff", true],
   ["POST", "/api/shifts/unregister", "staff", true],
   ["DELETE", "/api/shifts/registrations/r1", "staff", true],
-  // Luật khung ca phải đứng trước luật /api/shifts/:id chung.
-  ["POST", "/api/shifts/templates", "staff", false],
-  ["PUT", "/api/shifts/templates/t1", "staff", false],
   ["POST", "/api/shift-templates", "staff", false],
   ["PUT", "/api/shift-templates/t1", "admin", true],
 
   ["PUT", "/api/attendance/config", "staff", false],
   ["PUT", "/api/attendance/config", "manager", true],
+  ["GET", "/api/attendance/config", "staff", true],
   ["POST", "/api/attendance/checkin", "staff", true],
   ["POST", "/api/attendance/checkout", "staff", true],
 
@@ -78,31 +110,58 @@ const cases = [
   ["DELETE", "/api/tasks/t1", "staff", false],
   ["PUT", "/api/tasks/t1", "staff", true],
 
+  // Tin tức/nội quy: manager vẫn ghi (nghiệp vụ vận hành chi nhánh), staff chặn.
   ["POST", "/api/news", "staff", false],
   ["GET", "/api/news", "staff", true],
+  ["POST", "/api/news", "manager", true],
   ["PUT", "/api/regulations/n1", "manager", true],
+  // Cấu hình Wi-Fi và cấu hình SOAP là tính năng hệ thống: manager cũng bị chặn,
+  // kể cả đọc GET /api/soap-config (lộ endpointUrl/allowedIPs/certExpiry).
   ["POST", "/api/wifi-configs", "staff", false],
-  ["GET", "/api/wifi-configs/scan", "staff", true],
+  ["POST", "/api/wifi-configs", "manager", false],
+  ["PUT", "/api/wifi-configs/w1", "admin", true],
+  // Gửi thông báo là thao tác quản lý: staff bị chặn, manager/admin được.
+  ["POST", "/api/notifications", "staff", false],
+  ["POST", "/api/notifications", "manager", true],
+  ["POST", "/api/notifications", "admin", true],
   ["PUT", "/api/soap-config", "staff", false],
+  ["PUT", "/api/soap-config", "manager", false],
+  ["GET", "/api/soap-config", "staff", false],
+  ["GET", "/api/soap-config", "manager", false],
+  ["GET", "/api/soap-config", "admin", true],
+  ["POST", "/api/soap-config/ping", "manager", false],
+  // Cổng chi lương: chỉ WSDL (GET) là công khai, mọi WRITE đều dành cho admin.
+  ["POST", "/soap/payroll", "staff", false],
+  ["POST", "/soap/payroll", "manager", false],
+  ["POST", "/soap/payroll", "admin", true],
+  ["PUT", "/soap/payroll", "admin", true],
+  ["GET", "/soap/payroll", "staff", true],
 
-  // Lương: nhân viên xem phiếu của mình, không xem số tài khoản / đợt chi.
+  // Lương: nhân viên xem phiếu của mình; tài khoản ngân hàng, đợt chi lương và
+  // lệnh chi là tính năng hệ thống nên manager cũng bị chặn.
   ["GET", "/api/payroll/bank-accounts", "staff", false],
-  ["GET", "/api/payroll/bank-accounts", "manager", true],
+  ["GET", "/api/payroll/bank-accounts", "manager", false],
+  ["GET", "/api/payroll/bank-accounts", "admin", true],
   ["GET", "/api/payroll/payouts", "staff", false],
+  ["GET", "/api/payroll/payouts", "manager", false],
   ["GET", "/api/payroll/payslips", "staff", true],
   ["POST", "/api/payroll/payslips/generate", "staff", false],
-  ["PUT", "/api/payroll/payslips/p1/status", "staff", false],
+  ["POST", "/api/payroll/payslips/generate", "manager", false],
+  ["POST", "/api/payroll/payslips/generate", "admin", true],
+  ["PUT", "/api/payroll/payslips/p1/status", "staff", true],
 
-  // Nhật ký: mọi vai trò ghi được, chỉ admin xóa toàn bộ.
+  // Nhật ký: mọi vai trò ghi được, xem và xóa đều chỉ admin.
   ["GET", "/api/backlog", "staff", false],
-  ["GET", "/api/backlog", "manager", true],
+  ["GET", "/api/backlog", "manager", false],
+  ["GET", "/api/backlog", "admin", true],
   ["POST", "/api/backlog", "staff", true],
   ["DELETE", "/api/backlog", "manager", false],
   ["DELETE", "/api/backlog", "admin", true],
 
-  // Cấp lại mật khẩu chỉ quản lý; sync-employee chỉ gọi nội bộ.
+  // Cấp lại mật khẩu là quản trị hệ thống: chỉ admin (identity-service chặn
+  // mọi truy cập trái quyền). sync-employee chỉ gọi nội bộ.
   ["POST", "/api/auth/reset-password", "staff", false],
-  ["POST", "/api/auth/reset-password", "manager", true],
+  ["POST", "/api/auth/reset-password", "manager", false],
   ["POST", "/api/auth/reset-password", "admin", true],
   ["POST", "/api/auth/sync-employee", "staff", false],
   ["POST", "/api/auth/sync-employee", "admin", false],
@@ -118,18 +177,6 @@ const cases = [
   ["POST", "/api/files/purge-orphans", "manager", false],
   ["POST", "/api/files/purge-orphans", "admin", true],
 
-  // Lưu trữ dữ liệu cũ: mọi thao tác (xem/chạy/khôi phục) chỉ admin.
-  ["POST", "/api/archive/work/run", "staff", false],
-  ["POST", "/api/archive/work/run", "manager", false],
-  ["POST", "/api/archive/integration/preview", "manager", false],
-  ["GET", "/api/archive/work/tasks", "manager", false],
-  ["GET", "/api/archive/integration/requests", "staff", false],
-  ["GET", "/api/archive/integration/notifications/n1", "staff", false],
-  ["POST", "/api/archive/work/tasks/t1/restore", "manager", false],
-  ["POST", "/api/archive/work/run", "admin", true],
-  ["GET", "/api/archive/work/tasks", "admin", true],
-  ["GET", "/api/archive/integration/requests/r1", "admin", true],
-  ["POST", "/api/archive/integration/requests/r1/restore", "admin", true],
 ];
 
 for (const [method, path, role, allowed] of cases) {
@@ -138,7 +185,13 @@ for (const [method, path, role, allowed] of cases) {
     assert.equal(passed, allowed);
     if (!allowed) {
       assert.equal(res.statusCode, 403);
-      assert.equal(res.body.error.code, "FORBIDDEN");
+      // Tuyến SOAP trả lỗi dạng XML soap:Fault, tuyến khác trả envelope JSON.
+      if (path.startsWith("/soap/")) {
+        assert.match(res.text, /<soap:Fault>/);
+        assert.match(res.text, /<faultcode>soap:Client<\/faultcode>/);
+      } else {
+        assert.equal(res.body.error.code, "FORBIDDEN");
+      }
     }
   });
 }

@@ -15,6 +15,8 @@ router.post("/payroll/payouts", PayrollController.createPayout);
 
 router.get("/payroll/payslips", PayrollController.listPayslips);
 router.post("/payroll/payslips/generate", PayrollController.generatePayslip);
+router.post("/payroll/payslips/:id/confirm", PayrollController.confirmPayslip);
+router.put("/payroll/payslips/:id/confirm", PayrollController.confirmPayslip);
 router.put("/payroll/payslips/:id/status", PayrollController.setPayslipStatus);
 router.put("/payroll/payslips/:id", PayrollController.updatePayslip);
 router.get("/payroll/payslips/:id", PayrollController.getPayslip);

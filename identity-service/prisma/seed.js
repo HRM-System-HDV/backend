@@ -1,28 +1,16 @@
 "use strict";
-
+require("dotenv").config();
 const bcrypt = require("bcryptjs");
-
-// Seed dùng khi DATABASE_URL Postgres khả dụng: node prisma/seed.js
-// Không commit .env thật. Chạy: DATABASE_URL=... node prisma/seed.js
 async function main() {
+  const email = String(process.env.SEED_ADMIN_EMAIL || "").trim().toLowerCase();
+  const password = process.env.SEED_ADMIN_PASSWORD;
+  if (!email.includes("@") || !password || password.length < 8) throw new Error("Cần SEED_ADMIN_EMAIL và SEED_ADMIN_PASSWORD tối thiểu 8 ký tự để tạo admin");
   const { PrismaClient } = require("@prisma/client");
   const prisma = new PrismaClient();
-  const seeds = [
-    { id: "NV-0001", email: "admin@company.com", name: "Trần Minh Tuấn", role: "admin", roleTitle: "Quản trị viên", branchSlug: null },
-  ];
-  // Không xoá tài khoản khác khi seed: giữ nguyên dữ liệu thật trong DB.
-  for (const s of seeds) {
-    await prisma.user.upsert({
-      where: { email: s.email },
-      update: {},
-      create: { ...s, passwordHash: bcrypt.hashSync("123456", 10) },
-    });
-  }
-  console.log("Seed xong tài khoản admin mặc định (không xoá tài khoản khác)");
-  await prisma.$disconnect();
+  try {
+    await prisma.user.upsert({ where: { email }, update: {}, create: { email, name: process.env.SEED_ADMIN_NAME || "Quản trị viên", systemRole: "admin", passwordHash: await bcrypt.hash(password, 10) } });
+    console.log("Đã tạo admin nếu chưa tồn tại; không thay đổi tài khoản có sẵn");
+  } finally { await prisma.$disconnect(); }
 }
-
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
+module.exports = { main };

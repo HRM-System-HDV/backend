@@ -1,28 +1,6 @@
 "use strict";
-
-function validatePayout(body = {}) {
-  const errors = [];
-  if (!body.idempotencyKey) errors.push("Thiếu idempotencyKey");
-  if (!body.debitAccount) errors.push("Thiếu tài khoản trích nợ");
-  if (body.totalAmount === undefined || body.totalAmount === null) errors.push("Thiếu tổng tiền chi");
-  else if (Number(body.totalAmount) <= 0) errors.push("Tổng tiền chi phải lớn hơn 0");
-  return errors;
-}
-
-function validateGenerate(body = {}) {
-  const errors = [];
-  if (!body.employeeId) errors.push("Thiếu employeeId");
-  if (!body.month) errors.push("Thiếu tháng (MM-YYYY)");
-  else if (!/^\d{2}-\d{4}$/.test(body.month)) errors.push("Tháng phải đúng định dạng MM-YYYY");
-  if (body.baseSalary === undefined && body.autoFetch !== true) {
-    errors.push("Thiếu lương cơ bản (hoặc bật autoFetch để lấy từ organization-service)");
-  }
-  return errors;
-}
-
-function monthToQuery(monthMMYYYY) {
-  const [mm, yyyy] = monthMMYYYY.split("-");
-  return `${yyyy}-${mm}`;
-}
-
-module.exports = { validatePayout, validateGenerate, monthToQuery };
+const { ValidationError } = require("../utils/errors");
+function uuid(value, label = "id") { if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) throw new ValidationError(`${label} phải là UUID`); return value.toLowerCase(); }
+function month(value) { if (typeof value !== "string" || !/^\d{4}-(0[1-9]|1[0-2])$/.test(value)) throw new ValidationError("Kỳ lương phải đúng YYYY-MM"); return value; }
+function money(value, label) { const text = String(value); if (!/^\d+$/.test(text) || text.length > 15) throw new ValidationError(`${label} phải là số tiền VNĐ không âm, tối đa 15 chữ số`); return text.replace(/^0+(?=\d)/, ""); }
+module.exports = { uuid, month, money };

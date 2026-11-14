@@ -1,0 +1,5 @@
+BEGIN;
+
+ALTER TABLE "payslips" ADD COLUMN "workedShifts" INTEGER;
+
+COMMIT;

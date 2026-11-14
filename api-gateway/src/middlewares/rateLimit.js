@@ -3,6 +3,7 @@
 // Giới hạn tần suất tại gateway (TECHS.md §6.3): cửa sổ trượt trong bộ nhớ
 // theo IP. Vượt quá trả 429 đúng envelope.
 const config = require("../config");
+const { sendError } = require("../utils/soapFault");
 
 function createRateLimitMiddleware(options = {}) {
   const windowMs = options.windowMs || config.rateLimitWindowMs;
@@ -21,9 +22,7 @@ function createRateLimitMiddleware(options = {}) {
     }
     entry.count += 1;
     if (entry.count > max) {
-      return res.status(429).json({
-        error: { code: "RATE_LIMITED", message: "Quá nhiều yêu cầu, vui lòng thử lại sau" },
-      });
+      return sendError(req, res, 429, "RATE_LIMITED", "Quá nhiều yêu cầu, vui lòng thử lại sau");
     }
     return next();
   }

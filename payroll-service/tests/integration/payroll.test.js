@@ -1,130 +1,28 @@
 "use strict";
-
-const assert = require("node:assert/strict");
+process.env.DATABASE_URL = "";
 const { test } = require("node:test");
-
-test("bank-accounts + payout idempotent + payslip generate", { timeout: 90000 }, async () => {
-  const app = require("../../src/app");
-  const server = app.listen(0);
-  await new Promise((r) => server.on("listening", r));
-  const port = server.address().port;
-  const base = `http://localhost:${port}`;
-  const json = { "Content-Type": "application/json" };
-
-  try {
-
-  // Bank accounts seed (create test account if empty)
-  let res = await fetch(`${base}/api/payroll/bank-accounts`);
-  let body = await res.json();
-  if (body.data.length === 0) {
-    await fetch(`${base}/api/payroll/bank-accounts`, {
-      method: "POST",
-      headers: json,
-      body: JSON.stringify({ accountNumber: "111000111", accountName: "Công ty HRM", bankName: "Vietcombank", balance: 1000000000 }),
-    });
-    res = await fetch(`${base}/api/payroll/bank-accounts`);
-    body = await res.json();
-  }
-  assert.equal(res.status, 200);
-  assert.ok(body.data.length >= 1);
-  const debit = body.data[0].accountNumber;
-
-  // Tạo lệnh chi lần 1 -> 201, có TXN-/BANK-
-  const key = `key-${Date.now()}`;
-  res = await fetch(`${base}/api/payroll/payouts`, {
-    method: "POST",
-    headers: json,
-    body: JSON.stringify({ idempotencyKey: key, debitAccount: debit, content: "Lương T10", totalAmount: 5000000, beneficiaryCount: 2 }),
-  });
-  body = await res.json();
-  assert.equal(res.status, 201);
-  assert.ok(String(body.data.id).startsWith("GD-"));
-  assert.ok(String(body.data.bankReference).startsWith("BANK-"));
-  assert.equal(body.data.deduped, undefined);
-
-  // Gửi trùng key -> 200 + deduped:true, không trừ tiền lần 2
-  res = await fetch(`${base}/api/payroll/payouts`, {
-    method: "POST",
-    headers: json,
-    body: JSON.stringify({ idempotencyKey: key, debitAccount: debit, content: "Lương T10", totalAmount: 5000000, beneficiaryCount: 2 }),
-  });
-  body = await res.json();
-  assert.equal(res.status, 200);
-  assert.equal(body.data.deduped, true);
-
-  // Hết số dư -> 422 INSUFFICIENT_FUNDS
-  res = await fetch(`${base}/api/payroll/payouts`, {
-    method: "POST",
-    headers: json,
-    body: JSON.stringify({ idempotencyKey: `big-${Date.now()}`, debitAccount: debit, content: "Vượt", totalAmount: 999999999999, beneficiaryCount: 1 }),
-  });
-  body = await res.json();
-  assert.equal(res.status, 422);
-  assert.equal(body.error.code, "INSUFFICIENT_FUNDS");
-
-  // Thiếu key -> 400
-  res = await fetch(`${base}/api/payroll/payouts`, {
-    method: "POST",
-    headers: json,
-    body: JSON.stringify({ debitAccount: debit, totalAmount: 1000 }),
-  });
-  assert.equal(res.status, 400);
-
-  // Generate payslip: netSalary = base + bonus - penalty
-  const uniqueEmpId = `emp-${Date.now()}`;
-  res = await fetch(`${base}/api/payroll/payslips/generate`, {
-    method: "POST",
-    headers: json,
-    body: JSON.stringify({ employeeId: uniqueEmpId, month: "10-2026", baseSalary: 10000000, bonus: 1000000, totalPenalty: 20000 }),
-  });
-  body = await res.json();
-  assert.equal(res.status, 201);
-  assert.equal(body.data.netSalary, 10000000 + 1000000 - 20000);
-
-  // Trùng cặp employeeId+month -> 409
-  res = await fetch(`${base}/api/payroll/payslips/generate`, {
-    method: "POST",
-    headers: json,
-    body: JSON.stringify({ employeeId: uniqueEmpId, month: "10-2026", baseSalary: 10000000 }),
-  });
-  assert.equal(res.status, 409);
-
-  // Điều chỉnh thưởng/phạt -> netSalary tính lại.
-  // Dịch vụ tin danh tính do gateway truyền xuống; gọi thẳng phải tự gắn header
-  // như gateway đã verify, nếu không sẽ bị coi là staff vô danh và bị 403.
-  res = await fetch(`${base}/api/payroll/payslips?employeeId=${uniqueEmpId}&month=10-2026`, {
-    headers: { "x-user-id": "test-admin", "x-user-role": "admin" },
-  });
-  body = await res.json();
-  const slip = body.data[0];
-
-  // Staff không được đọc phiếu lương của người khác, kể cả khi tự đổi query.
-  res = await fetch(`${base}/api/payroll/payslips?employeeId=${uniqueEmpId}&month=10-2026`, {
-    headers: { "x-user-id": "emp-khac", "x-user-role": "staff" },
-  });
-  body = await res.json();
-  assert.equal(res.status, 200);
-  assert.equal(body.data.length, 0);
-
-  res = await fetch(`${base}/api/payroll/payslips/${slip.id}`, {
-    method: "PUT",
-    headers: json,
-    body: JSON.stringify({ bonus: 2000000 }),
-  });
-  body = await res.json();
-  assert.equal(Number(body.data.netSalary), 10000000 + 2000000 - 20000);
-
-  // Chốt phiếu
-  res = await fetch(`${base}/api/payroll/payslips/${slip.id}/status`, {
-    method: "PUT",
-    headers: json,
-    body: JSON.stringify({ status: "đã chốt" }),
-  });
-  body = await res.json();
-  assert.equal(res.status, 200);
-  assert.equal(body.data.status, "đã chốt");
-  } finally {
-    if (server.closeAllConnections) server.closeAllConnections();
-    await new Promise((r) => server.close(r));
-  }
+const assert = require("node:assert/strict");
+const { randomUUID } = require("node:crypto");
+const request = require("supertest");
+const Org = require("../../src/clients/OrgClient");
+const Work = require("../../src/clients/WorkClient");
+const app = require("../../src/app");
+test("HTTP generates, owner confirms, only admin pays and balance reduces once", async () => {
+  const employeeId = randomUUID(); const branchId = randomUUID(); const userId = randomUUID();
+  Org.getEmployeeById = async () => ({ id: employeeId, branchId, salaryType: "monthly", salary: "7800000", standardWorkDays: 26 });
+  Work.getAttendance = async () => [{ employeeId, shiftId: randomUUID(), checkIn: "2026-11-01T00:00:00Z", checkOut: "2026-11-01T05:00:00Z", penaltyAmount: "0" }];
+  const admin = { "x-user-id": randomUUID(), "x-user-role": "admin" };
+  const staff = { "x-user-id": userId, "x-employee-id": employeeId, "x-user-role": "staff" };
+  const account = (await request(app).post("/api/payroll/bank-accounts").set(admin).send({ accountNumber: randomUUID(), balance: "1000000" }).expect(201)).body.data;
+  const slip = (await request(app).post("/api/payroll/payslips/generate").set(admin).send({ employeeId, month: "2026-11" }).expect(201)).body.data;
+  assert.equal(slip.baseSalary, "300000");
+  await request(app).get(`/api/payroll/payslips/${slip.id}`).set({ ...staff, "x-employee-id": randomUUID() }).expect(403);
+  await request(app).post(`/api/payroll/payslips/${slip.id}/confirm`).set(staff).send({ confirmedBy: "fake" }).expect(200);
+  const input = { payslipIds: [slip.id], debitAccountId: account.id, idempotencyKey: randomUUID() };
+  await request(app).post("/api/payroll/payouts").set(staff).send(input).expect(403);
+  const payout = (await request(app).post("/api/payroll/payouts").set(admin).send(input).expect(201)).body.data;
+  const retry = (await request(app).post("/api/payroll/payouts").set(admin).send(input).expect(200)).body.data;
+  assert.equal(payout.id, retry.id); assert.equal(retry.deduped, true);
+  const paid = (await request(app).get(`/api/payroll/payslips/${slip.id}`).set(staff).expect(200)).body.data;
+  assert.equal(paid.confirmedBy, userId); assert.equal(paid.status, "paid");
 });

@@ -45,4 +45,13 @@ class ForbiddenError extends Error {
   }
 }
 
-module.exports = { ValidationError, NotFoundError, ForbiddenError, DuplicateError, InsufficientFundsError };
+class InternalServerError extends Error {
+  constructor(message) {
+    super(message || "Lỗi hệ thống");
+    this.name = "InternalServerError";
+    this.status = 500;
+    this.code = "INTERNAL_SERVER_ERROR";
+  }
+}
+
+module.exports = { ValidationError, NotFoundError, ForbiddenError, DuplicateError, InsufficientFundsError, InternalServerError };

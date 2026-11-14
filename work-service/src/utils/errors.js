@@ -18,6 +18,16 @@ class NotFoundError extends Error {
   }
 }
 
+class InternalServerError extends Error {
+  constructor(message, cause) {
+    super(message || "Lỗi hệ thống");
+    this.name = "InternalServerError";
+    this.status = 500;
+    this.code = "INTERNAL_SERVER_ERROR";
+    if (cause) this.cause = cause;
+  }
+}
+
 class ForbiddenError extends Error {
   constructor(message) {
     super(message || "Không có quyền thực hiện thao tác này");
@@ -27,4 +37,20 @@ class ForbiddenError extends Error {
   }
 }
 
-module.exports = { ValidationError, NotFoundError, ForbiddenError };
+// 401 = request CHƯA xác thực; 403 (ForbiddenError) = đã xác thực nhưng thiếu quyền.
+// Chuẩn chung của dự án (docs/RULES.md §5.3).
+class UnauthorizedError extends Error {
+  constructor(message) {
+    super(message || "Vui lòng đăng nhập để tiếp tục");
+    this.name = "UnauthorizedError";
+    this.status = 401;
+    this.code = "UNAUTHORIZED";
+  }
+}
+
+class ConflictError extends Error {
+  constructor(message = "Dữ liệu đã tồn tại hoặc vừa thay đổi, vui lòng tải lại") {
+    super(message); this.status = 409; this.code = "DUPLICATE_RESOURCE";
+  }
+}
+module.exports = { ValidationError, NotFoundError, ForbiddenError, UnauthorizedError, InternalServerError, ConflictError };

@@ -56,3 +56,9 @@ dist/
 # Local notes
 Coding.md
 
+
+# Test coverage
+coverage/
+**/coverage/
+*.lcov
+

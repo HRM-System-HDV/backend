@@ -1,5 +1,13 @@
 // Prisma schema — organization-service
 // DB riêng hrm_organization (single-tenant, không có tenantId).
+//
+// Quy tắc định danh (chốt 12/11/2026):
+//  - id: UUID (uuid(7) — sắp xếp theo thời gian) cho mọi khóa chính và khóa ngoại.
+//  - *Code: mã nghiệp vụ UNIQUE để tra cứu + hiển thị (CN-00001, DEPT-IT, POS-IT, NV-00001).
+//  - KHÔNG dùng slug: mọi tham chiếu đi qua id hoặc mã nghiệp vụ.
+//  - Tiền: Decimal(15,0) — VNĐ không có xu lẻ, không dùng Float (sai số nhị phân).
+//  - Ngày: DateTime @db.Date — lưu chuỗi "DD/MM/YYYY" làm Postgres so sánh ngày SAI thứ tự,
+//    khiến mọi câu lọc khoảng ngày (BETWEEN) trả sai tập bản ghi.
 generator client {
   provider = "prisma-client-js"
 }
@@ -9,64 +17,138 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model Branch {
-  id        String   @id @default(cuid())
-  name      String
-  slug      String   @unique
-  address   String?
-  manager   String?
-  status    String   @default("hoạt động")
-  staff     Int      @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+// Quy tắc nghiệp vụ; CHECK/index bổ sung nằm trong migration của service:
+// - CHECK salary >= 0 và resignedAt >= joinDate nếu có cả hai ngày.
+// - CHECK monthly bắt buộc standardWorkDays > 0; hourly để null.
+//   DB có CHECK tương ứng; BE cũng kiểm tra đầu vào để trả lỗi rõ ràng.
+// - Service kiểm tra position.departmentId khớp employee.departmentId khi vị trí có phòng.
+// - Chi nhánh/phòng của nhân viên và người quản lý phải phù hợp phạm vi quản lý.
+// - Email được trim + chuẩn hóa chữ thường trước khi ghi ở cả identity và organization.
+// CHECK/index tương ứng đã khai báo trong migration 20261112230000_hrm_uuid_redesign.
 
+model Branch {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  // Mã chi nhánh CN-00001 — sinh bằng sequence của Postgres (xem migration).
+  // Dùng hàm pad_code() vì lpad() CẮT chuỗi khi số vượt độ dài (1000 -> "100").
+  branchCode String   @unique @default(dbgenerated("'CN-' || pad_code(nextval('branch_code_seq'), 5)"))
+  name       String
+  address    String?
+  // Người quản lý chi nhánh = employees.id, FK THẬT trong cùng DB.
+  // (Trước đây để cột trần vì lo "phụ thuộc vòng khi insert" — lo đó sai:
+  // Postgres kiểm FK theo TỪNG câu lệnh, không theo chu trình quan hệ.
+  // Thứ tự tạo đúng: insert branch với managerId = NULL, rồi UPDATE gán người.)
+  managerId  String?  @db.Uuid
+  status     String   @default("hoạt động")
+  createdAt  DateTime @default(now())
+
+  manager   Employee?  @relation("BranchManager", fields: [managerId], references: [id], onDelete: SetNull)
+  employees Employee[]
+
+  @@index([managerId])
+  @@index([name])
   @@map("branches")
 }
 
 model Department {
-  id        String   @id @default(cuid())
-  name      String
-  code      String   @unique
-  manager   String?
-  status    String   @default("hoạt động")
-  staff     Int      @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id             String   @id @default(uuid(7)) @db.Uuid
+  // Mã phòng ban DEPT-IT — do người dùng nhập, UNIQUE.
+  departmentCode String   @unique
+  name           String
+  // Người phụ trách = employees.id, FK thật (lý do như Branch.managerId).
+  managerId      String?  @db.Uuid
+  status         String   @default("hoạt động")
+  createdAt      DateTime @default(now())
 
+  manager   Employee?  @relation("DepartmentManager", fields: [managerId], references: [id], onDelete: SetNull)
+  employees Employee[]
+  positions Position[]
+
+  @@index([managerId])
+  @@index([name])
   @@map("departments")
 }
 
+// Danh mục vị trí (chức danh chuẩn hoá) — dùng mã nghiệp vụ POS-IT.
+model Position {
+  id           String   @id @default(uuid(7)) @db.Uuid
+  positionCode String   @unique
+  name         String
+  departmentId String?  @db.Uuid
+  status       String   @default("hoạt động")
+  createdAt    DateTime @default(now())
+
+  department Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  employees  Employee[]
+
+  @@index([departmentId])
+  @@index([name])
+  @@map("positions")
+}
+
 model Employee {
-  id                String   @id @default(cuid())
+  id                String     @id @default(uuid(7)) @db.Uuid
+  // Mã nhân viên NV-00001 — sinh bằng sequence của Postgres (xem migration).
+  employeeCode      String     @unique @default(dbgenerated("'NV-' || pad_code(nextval('employee_code_seq'), 5)"))
   name              String
-  email             String   @unique
+  email             String     @unique
   phone             String?
   gender            String?
-  birthDate         String?
-  province          String?  // Tỉnh / Thành phố
-  ward              String?  // Phường
-  street            String?  // Số nhà / Tên đường
+  birthDate         DateTime?  @db.Date
+  province          String?
+  ward              String?
+  street            String?
   cccd              String?
-  issueDate         String?
+  issueDate         DateTime?  @db.Date
   issuePlace        String?
   cccdFront         String?
   cccdBack          String?
   avatar            String?
-  branchSlug        String?
-  department        String?
-  role              String?
-  systemRole        String   @default("staff")
-  status            String   @default("đang làm")
-  joinDate          String?
-  resignedAt        DateTime?
-  baseSalary        Float    @default(0)
-  salaryType        String   @default("monthly")
-  hourlySalary      Float?
+  branchId          String?    @db.Uuid
+  departmentId      String?    @db.Uuid
+  positionId        String?    @db.Uuid
+  // Vai trò phân quyền chỉ thuộc User của identity-service.
+  // Trạng thái làm việc: đang làm | nghỉ việc | ...
+  // KHÔNG xoá cứng nhân viên (R11): nghỉ việc chỉ đổi cột này.
+  status            String     @default("đang làm")
+  // Mốc thôi việc — KHÔNG trùng với `status`: status trả lời "thế nào",
+  // cột này trả lời "từ ngày nào" (lương prorated, thống kê, đơn nghỉ phép).
+  resignedAt        DateTime?  @db.Date
+  joinDate          DateTime?  @db.Date
+  // Kiểu lương: monthly = salary là lương tháng; hourly = salary là tiền 1 giờ.
+  // Chỉ tích lũy lương từ ca có đủ check-in và checkout hợp lệ.
+  // hourly: salary x tổng giờ thực tế; monthly: (salary / standardWorkDays) x số ca hoàn thành.
+  // Các khoản cộng/trừ được áp dụng sau bước này ở payroll.
+  // Chỉ MỘT cột tiền — payroll tự đọc salaryType để biết cách tính.
+  // KHÔNG có default "monthly" và KHÔNG có salary default 0: hai giá trị đó cộng lại
+  // thành "nhân viên lương 0đ/tháng" — phiếu lương ra 0 mà không ai báo lỗi.
+  // Chọn sai kiểu lương là tính sai cả kỳ, nên BE buộc phải ghi rõ cả hai.
+  salaryType        SalaryType
+  salary            Decimal    @db.Decimal(15, 0)
+  // Số công/tháng thỏa thuận khi nhận nhân viên, do quản lý nhập; 1 ca = 1 công.
+  // monthly bắt buộc có; hourly để null; không suy ra từ lịch hoặc công thực tế.
+  // salary / standardWorkDays là lương mỗi ca, dùng tích lũy lương và làm cơ sở phạt.
+  standardWorkDays  Int?
   bankName          String?
+  // Số tài khoản ngân hàng + tên chủ tài khoản.
   bankAccountNumber String?
   bankAccountName   String?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  createdAt         DateTime   @default(now())
 
+  branch             Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  department         Department?  @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  position           Position?    @relation(fields: [positionId], references: [id], onDelete: SetNull)
+  // Ngược chiều với Branch.managerId / Department.managerId (quan hệ đặt tên).
+  managedBranches    Branch[]     @relation("BranchManager")
+  managedDepartments Department[] @relation("DepartmentManager")
+
+  @@index([branchId])
+  @@index([departmentId])
+  @@index([positionId])
+  @@index([name])
   @@map("employees")
+}
+
+enum SalaryType {
+  monthly
+  hourly
 }

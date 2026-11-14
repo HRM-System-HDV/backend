@@ -2,6 +2,14 @@
 
 require("dotenv").config();
 
+if (process.env.NODE_ENV === "production") {
+  const jwtSecret = process.env.JWT_SECRET;
+  if (!jwtSecret || jwtSecret.startsWith("dev_only_")) {
+    console.error("[FATAL] Production startup validation failed: JWT_SECRET is missing or using insecure default value.");
+    process.exit(1);
+  }
+}
+
 module.exports = {
   port: parseInt(process.env.PORT || "4000", 10),
   serviceName: process.env.SERVICE_NAME || "api-gateway",
@@ -18,7 +26,7 @@ module.exports = {
     { method: "POST", path: "/api/auth/login", exact: true },
     { method: "POST", path: "/api/auth/refresh", exact: true },
     { method: "POST", path: "/api/auth/forgot-password", exact: true },
-    { method: "GET", path: "/soap/payroll", exact: false },
+    { method: "GET", path: "/soap/payroll", exact: true },
   ],
   targets: {
     identity: process.env.IDENTITY_URL || "http://localhost:4001",

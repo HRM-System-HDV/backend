@@ -1,477 +1,243 @@
 "use strict";
-
-// AuthService (Flat 3-Tier Mẫu A): gộp UserRepository + DeviceRepository + User entity cũ,
-// gọi trực tiếp Prisma + fallback in-memory. Luồng Route -> Controller -> Service -> Prisma.
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const database = require("../config/database");
 const { UnauthorizedError, ValidationError, ForbiddenError, NotFoundError } = require("../utils/errors");
 const { signAccessToken, signRefreshToken, verifyToken } = require("../utils/jwt");
-
 const ALLOWED_ROLES = ["admin", "manager", "staff"];
-
-// Helper thay User entity cũ: validate + ẩn passwordHash khỏi response.
+const users = new Map();
+const devices = new Map();
+const tokens = new Map();
+const normalizeEmail = value => String(value || "").trim().toLowerCase();
+const isUuid = value => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ""));
 function toSafeUser(row) {
-  if (!row || !row.email || !row.email.includes("@")) {
-    const e = new Error("Email không hợp lệ");
-    e.code = "VALIDATION_ERROR";
-    e.status = 400;
-    throw e;
+  if (!row || !normalizeEmail(row.email).includes("@") || !ALLOWED_ROLES.includes(row.systemRole)) throw new ValidationError("Thông tin tài khoản không hợp lệ");
+  return { id: row.id, employeeId: row.employeeId || null, email: row.email, name: row.name, systemRole: row.systemRole, role: row.systemRole, branchId: row.branchId || null };
+}
+async function findUser(where) {
+  const prisma = database.getPrisma();
+  return prisma ? prisma.user.findUnique({ where }) : [...users.values()].find(row => Object.entries(where).every(([key, value]) => row[key] === value)) || null;
+}
+async function saveUser(id, data) {
+  const prisma = database.getPrisma();
+  if (prisma) return prisma.user.update({ where: { id }, data });
+  const row = users.get(id);
+  if (!row) throw new NotFoundError("Không tìm thấy tài khoản");
+  Object.assign(row, data);
+  return row;
+}
+// Nền tảng client (web/mobile) do API Gateway quyết định và truyền xuống qua
+// header `x-client-platform` (Gateway đã xóa header giả mạo của client trước khi
+// forward). Vì vậy:
+//   - Ưu tiên header `x-client-platform` làm giá trị chuẩn.
+//   - `body.clientPlatform` là dữ liệu KHÔNG TIN CẬY khi request đi qua Gateway
+//     (client tự khai nền tảng được) -> chỉ dùng làm fallback cho lệnh gọi nội
+//     bộ gọi thẳng identity-service mà không qua Gateway.
+function clientPlatform(body = {}, req) {
+  const fromHeader = String((req?.headers || {})["x-client-platform"] || "").trim().toLowerCase();
+  const fromBody = String(body.clientPlatform || "").trim().toLowerCase();
+  const value = fromHeader || fromBody || "web";
+  if (!["web", "mobile"].includes(value)) throw new ValidationError("clientPlatform chỉ nhận web hoặc mobile");
+  return value;
+}
+// Nhân viên (staff) chỉ được đăng nhập trên Mobile (RULES.md §7); admin và
+// manager dùng được cả hai nền tảng nên không bị chặn. Ngoài ra phiên staff
+// không được dùng cookie phiên web (hrm-session / hrm-refresh).
+function requirePlatform(user, platform, req) {
+  if (user.systemRole !== "staff") return;
+  if (platform !== "mobile") throw new ForbiddenError("Nhân viên chỉ được đăng nhập trên Mobile");
+  if (req?.cookies?.["hrm-refresh"] || req?.cookies?.["hrm-session"]) {
+    throw new ForbiddenError("Nhân viên chỉ được đăng nhập trên Mobile");
   }
-  if (!ALLOWED_ROLES.includes(row.role)) {
-    const e = new Error("Vai trò không hợp lệ");
-    e.code = "VALIDATION_ERROR";
-    e.status = 400;
-    throw e;
-  }
-  return {
-    id: row.id,
-    email: row.email,
-    name: row.name,
-    role: row.role,
-    roleTitle: row.roleTitle,
-    branchSlug: row.branchSlug || null,
-  };
 }
-
-// --- Truy xuất User (gộp từ UserRepository cũ) ---
-const SEED_DEFS = [
-  { id: "NV-0001", email: "admin@company.com", name: "Trần Minh Tuấn", role: "admin", roleTitle: "Quản trị viên", branchSlug: null },
-];
-
-const memoryUsers = SEED_DEFS.map((u) => ({
-  ...u,
-  passwordHash: bcrypt.hashSync("123456", 10),
-}));
-
-async function findUserByEmail(email) {
-  const prisma = database.getPrisma();
-  if (!prisma) return memoryUsers.find((u) => u.email === email) || null;
-  const row = await prisma.user.findUnique({ where: { email } });
-  return row || null;
+function clientInfo(req = {}) {
+  const headers = req.headers || {};
+  const read = name => { try { return headers[name] ? decodeURIComponent(String(headers[name])) : null; } catch { return String(headers[name]); } };
+  // IP lấy từ header `x-client-ip` do Gateway chuẩn hóa từ socket. Tuyệt đối
+  // không tin `x-forwarded-for` do client gửi vì client tự giả mạo được.
+  const rawIp = String(headers["x-client-ip"] || (req.socket && req.socket.remoteAddress) || "").trim();
+  const ipAddress = rawIp ? (rawIp.startsWith("::ffff:") ? rawIp.slice(7) : rawIp) : null;
+  // `location` chỉ là dữ liệu hiển thị cho người dùng (client tự khai), KHÔNG
+  // dùng để quyết định bảo mật.
+  return { deviceName: read("x-device-name") || "Thiết bị không xác định", deviceType: read("x-device-type"), osInfo: read("x-os-info"), location: read("x-location"), ipAddress };
 }
-
-async function findUserById(id) {
+async function registerDevice(userId, req) {
+  const data = { userId, ...clientInfo(req), lastSeenAt: new Date() };
   const prisma = database.getPrisma();
-  if (!prisma) return memoryUsers.find((u) => u.id === id) || null;
-  const row = await prisma.user.findUnique({ where: { id } });
-  return row || null;
+  if (prisma) return prisma.deviceSession.create({ data });
+  const row = { id: crypto.randomUUID(), ...data, createdAt: new Date() };
+  devices.set(row.id, row);
+  return row;
 }
-
-async function updateUserPassword(id, passwordHash) {
+async function getDevice(id) {
   const prisma = database.getPrisma();
-  if (!prisma) {
-    const u = memoryUsers.find((u) => u.id === id);
-    if (u) u.passwordHash = passwordHash;
+  return prisma ? prisma.deviceSession.findUnique({ where: { id } }) : devices.get(id);
+}
+async function storeToken(token, userId, deviceSessionId) {
+  const payload = verifyToken(token);
+  const data = { token, userId, deviceSessionId, expiresAt: new Date(payload.exp * 1000), revoked: false };
+  const prisma = database.getPrisma();
+  if (prisma) return prisma.refreshToken.create({ data });
+  tokens.set(token, { id: crypto.randomUUID(), ...data, createdAt: new Date() });
+}
+async function revokeSessions(userId, deviceSessionId) {
+  const prisma = database.getPrisma();
+  const where = { userId, ...(deviceSessionId ? { deviceSessionId } : {}) };
+  if (prisma) {
+    await prisma.$transaction(async tx => {
+      await tx.refreshToken.updateMany({ where, data: { revoked: true } });
+      await tx.deviceSession.deleteMany({ where: { userId, ...(deviceSessionId ? { id: deviceSessionId } : {}) } });
+    });
     return;
   }
-  await prisma.user.update({ where: { id }, data: { passwordHash } });
+  for (const record of tokens.values()) if (record.userId === userId && (!deviceSessionId || record.deviceSessionId === deviceSessionId)) record.revoked = true;
+  for (const [id, row] of devices) if (row.userId === userId && (!deviceSessionId || id === deviceSessionId)) devices.delete(id);
 }
-
-async function ensureSeeded() {
-  const prisma = database.getPrisma();
-  if (!prisma) return { mode: "memory", count: memoryUsers.length };
-  // Chỉ tạo tài khoản admin mặc định nếu DB chưa có.
-  // KHÔNG xoá các tài khoản khác: dữ liệu tài khoản thật phải được giữ nguyên.
-  for (const def of SEED_DEFS) {
-    const existed = await prisma.user.findUnique({ where: { email: def.email } });
-    if (!existed) {
-      await prisma.user.create({
-        data: { ...def, passwordHash: bcrypt.hashSync("123456", 10) },
-      });
-    }
-  }
-  const count = await prisma.user.count();
-  return { mode: "postgres", count };
-}
-
-// --- Quản lý phiên thiết bị (gộp từ DeviceRepository cũ, lưu in-memory) ---
-const userDevices = new Map();
-
-function parseClientInfo(req) {
-  const ua = req.headers["user-agent"] || "";
-  const ip = req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "127.0.0.1";
-
-  let deviceName = req.headers["x-device-name"];
-  let deviceType = req.headers["x-device-type"];
-  let osInfo = req.headers["x-os-info"];
-
-  if (!deviceName) {
-    if (ua.includes("iPhone")) {
-      deviceName = "iPhone 15 Pro Max";
-      deviceType = "phone";
-      osInfo = "iOS 18.0 • HRM Mobile";
-    } else if (ua.includes("iPad")) {
-      deviceName = "iPad Pro 11\"";
-      deviceType = "tablet";
-      osInfo = "iPadOS 17.5 • HRM Mobile";
-    } else if (ua.includes("Android")) {
-      deviceName = "Samsung Galaxy S24";
-      deviceType = "phone";
-      osInfo = "Android 14 • HRM Mobile";
-    } else if (ua.includes("Macintosh")) {
-      deviceName = "MacBook Pro 14\"";
-      deviceType = "desktop";
-      osInfo = "macOS Sonoma • Chrome 127";
-    } else if (ua.includes("Windows")) {
-      deviceName = "Windows PC";
-      deviceType = "desktop";
-      osInfo = "Windows 11 • Edge 127";
-    } else {
-      deviceName = "Trình duyệt Web";
-      deviceType = "desktop";
-      osInfo = "Web Portal";
-    }
-  }
-
-  return {
-    deviceName,
-    deviceType: deviceType || "desktop",
-    osInfo: osInfo || "HRM System",
-    location: "Hà Nội, Việt Nam",
-    ipAddress: typeof ip === "string" ? ip.split(",")[0].trim() : "127.0.0.1",
-  };
-}
-
-function initDefaultDevices() {
-  return [
-    {
-      id: "dev-01",
-      deviceName: "iPhone 15 Pro Max",
-      deviceType: "phone",
-      osInfo: "iOS 18.0 • Ứng dụng HRM Mobile",
-      location: "Hà Nội, Việt Nam",
-      ipAddress: "113.161.45.120",
-      lastActive: "Đang hoạt động",
-      isCurrent: true,
-      createdAt: new Date().toISOString(),
-    },
-    {
-      id: "dev-02",
-      deviceName: "iPad Pro 11\"",
-      deviceType: "tablet",
-      osInfo: "iPadOS 17.5 • Ứng dụng HRM Mobile",
-      location: "Hà Nội, Việt Nam",
-      ipAddress: "113.161.45.120",
-      lastActive: "2 giờ trước",
-      isCurrent: false,
-      createdAt: new Date(Date.now() - 7200000).toISOString(),
-    },
-    {
-      id: "dev-03",
-      deviceName: "MacBook Pro 14\"",
-      deviceType: "desktop",
-      osInfo: "macOS Sonoma • Chrome 127",
-      location: "Hà Nội, Việt Nam",
-      ipAddress: "14.241.224.89",
-      lastActive: "Hôm qua lúc 18:30",
-      isCurrent: false,
-      createdAt: new Date(Date.now() - 86400000).toISOString(),
-    },
-  ];
-}
-
-async function getDevicesByUserId(userId) {
-  if (!userDevices.has(userId)) {
-    userDevices.set(userId, initDefaultDevices());
-  }
-  return userDevices.get(userId);
-}
-
-async function registerDevice(userId, req) {
-  const client = parseClientInfo(req);
-  const devices = await getDevicesByUserId(userId);
-
-  devices.forEach((d) => (d.isCurrent = false));
-
-  const existingIndex = devices.findIndex(
-    (d) => d.deviceName === client.deviceName && d.ipAddress === client.ipAddress
-  );
-
-  const newDevice = {
-    id: existingIndex >= 0 ? devices[existingIndex].id : `dev-${Date.now().toString().slice(-4)}`,
-    deviceName: client.deviceName,
-    deviceType: client.deviceType,
-    osInfo: client.osInfo,
-    location: client.location,
-    ipAddress: client.ipAddress,
-    lastActive: "Đang hoạt động",
-    isCurrent: true,
-    createdAt: new Date().toISOString(),
-  };
-
-  if (existingIndex >= 0) {
-    devices[existingIndex] = newDevice;
-  } else {
-    devices.unshift(newDevice);
-  }
-
-  userDevices.set(userId, devices);
-  return newDevice;
-}
-
-async function removeDevice(userId, deviceId) {
-  const devices = await getDevicesByUserId(userId);
-  const filtered = devices.filter((d) => d.id !== deviceId);
-  userDevices.set(userId, filtered);
-  return { removed: true, remainingCount: filtered.length };
-}
-
-// --- Use cases ---
-async function loginUseCase({ email, password }, req) {
-  if (!email || !password) throw new ValidationError("Thiếu email hoặc mật khẩu");
-  const row = await findUserByEmail(email.toLowerCase().trim());
-  if (!row) throw new UnauthorizedError("Email hoặc mật khẩu không đúng");
-  const ok = await bcrypt.compare(password, row.passwordHash);
-  if (!ok) throw new UnauthorizedError("Email hoặc mật khẩu không đúng");
+async function issueTokens(row, platform, deviceSessionId) {
   const user = toSafeUser(row);
-  const payload = { userId: user.id, email: user.email, role: user.role, branchSlug: user.branchSlug };
-
-  if (req) {
-    try {
-      await registerDevice(user.id, req);
-    } catch (_) {
-      // Bỏ qua lỗi ghi nhận thiết bị
-    }
-  }
-
-  return {
-    user,
-    accessToken: signAccessToken(payload),
-    refreshToken: signRefreshToken(payload),
-  };
+  const payload = { userId: user.id, employeeId: user.employeeId, email: user.email, name: user.name, role: user.systemRole, systemRole: user.systemRole, branchId: user.systemRole === "admin" ? null : user.branchId, clientPlatform: platform, deviceSessionId };
+  const accessToken = signAccessToken(payload);
+  const refreshToken = signRefreshToken(payload);
+  await storeToken(refreshToken, user.id, deviceSessionId);
+  return { user, accessToken, refreshToken, deviceSessionId, clientPlatform: platform };
 }
-
+async function loginUseCase(body = {}, req) {
+  const platform = clientPlatform(body, req);
+  const row = await findUser({ email: normalizeEmail(body.email) });
+  if (!row || !body.password || !(await bcrypt.compare(body.password, row.passwordHash))) throw new UnauthorizedError("Email hoặc mật khẩu không đúng");
+  requirePlatform(row, platform, req);
+  const device = await registerDevice(row.id, req);
+  return issueTokens(row, platform, device.id);
+}
 async function getMeUseCase(userId) {
-  const row = await findUserById(userId);
-  if (!row) {
-    throw new UnauthorizedError("Phiên đăng nhập hết hạn");
-  }
+  const row = await findUser({ id: userId });
+  if (!row) throw new UnauthorizedError("Phiên đăng nhập hết hạn");
   return toSafeUser(row);
 }
-
 async function changePasswordUseCase({ userId, currentPassword, newPassword }) {
-  if (!currentPassword || !newPassword) {
-    throw new ValidationError("Thiếu mật khẩu hiện tại hoặc mật khẩu mới");
-  }
-  if (newPassword.length < 6) {
-    throw new ValidationError("Mật khẩu mới phải có tối thiểu 6 ký tự");
-  }
-  const row = await findUserById(userId);
-  if (!row) {
-    throw new NotFoundError("Không tìm thấy thông tin tài khoản");
-  }
-  const ok = await bcrypt.compare(currentPassword, row.passwordHash);
-  if (!ok) {
-    throw new ValidationError("Mật khẩu hiện tại không chính xác");
-  }
-  const newHash = await bcrypt.hash(newPassword, 10);
-  await updateUserPassword(userId, newHash);
-  return { ok: true };
+  if (typeof newPassword !== "string" || newPassword.length < 6 || !currentPassword) throw new ValidationError("Mật khẩu mới phải có tối thiểu 6 ký tự");
+  const row = await findUser({ id: userId });
+  if (!row || !(await bcrypt.compare(currentPassword, row.passwordHash))) throw new ValidationError("Mật khẩu hiện tại không chính xác");
+  await saveUser(userId, { passwordHash: await bcrypt.hash(newPassword, 10) });
+  await revokeSessions(userId);
+  return { ok: true, allSessionsRevoked: true };
 }
-
-// Hệ thống chưa có kênh gửi email/SMS nên không thể tự đặt lại mật khẩu an toàn.
-// Trả lời giống nhau cho mọi email để không lộ tài khoản nào tồn tại.
 async function forgotPasswordUseCase({ email }) {
-  if (!email || typeof email !== "string" || !email.includes("@")) {
-    throw new ValidationError("Email không hợp lệ");
-  }
-  return {
-    ok: true,
-    contactAdmin: true,
-    message: "Vì lý do bảo mật, vui lòng liên hệ quản trị viên hoặc quản lý để được cấp lại mật khẩu.",
-  };
+  if (!normalizeEmail(email).includes("@")) throw new ValidationError("Email không hợp lệ");
+  return { ok: true, contactAdmin: true, message: "Vui lòng liên hệ quản trị viên để được cấp lại mật khẩu" };
 }
-
-// Chỉ admin/manager được đặt lại mật khẩu người khác. Mật khẩu tạm sinh ngẫu nhiên,
-// chỉ trả về một lần cho người thao tác để họ chuyển cho nhân viên.
+function requireAdmin(actor) {
+  if ((actor?.systemRole || actor?.role) !== "admin") throw new ForbiddenError("Chỉ quản trị viên được quản lý tài khoản");
+}
 async function resetPasswordByAdminUseCase({ email, actor }) {
-  if (!actor || !["admin", "manager"].includes(actor.role)) {
-    throw new ForbiddenError("Chỉ quản trị viên hoặc quản lý được đặt lại mật khẩu");
-  }
-  if (!email || typeof email !== "string" || !email.includes("@")) {
-    throw new ValidationError("Email không hợp lệ");
-  }
-  const row = await findUserByEmail(email.toLowerCase().trim());
-  if (!row) {
-    throw new NotFoundError("Không tìm thấy tài khoản với email này trên hệ thống");
-  }
-  // Quản lý không được chiếm tài khoản quản trị viên.
-  if (actor.role === "manager" && row.role === "admin") {
-    throw new ForbiddenError("Quản lý không được đặt lại mật khẩu quản trị viên");
-  }
-  if (actor.userId && row.id === actor.userId) {
-    throw new ValidationError("Hãy dùng đổi mật khẩu để thay đổi mật khẩu của chính mình");
-  }
-  const tempPassword = crypto.randomBytes(9).toString("base64url");
-  await updateUserPassword(row.id, await bcrypt.hash(tempPassword, 10));
+  requireAdmin(actor);
+  const row = await findUser({ email: normalizeEmail(email) });
+  if (!row) throw new NotFoundError("Không tìm thấy tài khoản");
+  if (row.id === actor.userId) throw new ValidationError("Hãy dùng chức năng đổi mật khẩu cho tài khoản của mình");
+  const tempPassword = crypto.randomBytes(12).toString("base64url");
+  await saveUser(row.id, { passwordHash: await bcrypt.hash(tempPassword, 10) });
+  await revokeSessions(row.id);
   return { ok: true, email: row.email, tempPassword };
 }
-
-async function refreshTokenUseCase({ refreshToken }) {
-  if (!refreshToken) {
-    throw new ValidationError("Thiếu refresh token");
-  }
+async function refreshTokenUseCase(body = {}, req) {
+  const { refreshToken } = body;
   let payload;
-  try {
-    payload = verifyToken(refreshToken);
-  } catch (err) {
-    throw new UnauthorizedError("Refresh token không hợp lệ hoặc đã hết hạn");
-  }
-  if (payload.type !== "refresh") {
-    throw new UnauthorizedError("Token cung cấp không phải là refresh token");
-  }
-  const row = await findUserById(payload.userId);
-  if (!row) {
-    throw new UnauthorizedError("Người dùng không còn tồn tại");
-  }
-  const user = toSafeUser(row);
-  const tokenPayload = { userId: user.id, email: user.email, role: user.role, branchSlug: user.branchSlug };
-  return {
-    user,
-    accessToken: signAccessToken(tokenPayload),
-    refreshToken: signRefreshToken(tokenPayload),
-  };
-}
-
-async function getDevicesUseCase(userId) {
-  return await getDevicesByUserId(userId);
-}
-
-async function revokeDeviceUseCase(userId, deviceId) {
-  if (!deviceId) throw new ValidationError("Thiếu deviceId");
-  return await removeDevice(userId, deviceId);
-}
-
-async function syncEmployeeUseCase({ employee, action = "upsert" }) {
-  if (!employee) return { ok: false };
+  try { payload = verifyToken(refreshToken); } catch { throw new UnauthorizedError("Refresh token không hợp lệ hoặc đã hết hạn"); }
+  if (payload.type !== "refresh") throw new UnauthorizedError("Token không phải refresh token");
   const prisma = database.getPrisma();
-
-  if (action === "delete") {
-    // Mã nhân sự ở organization và users.id là hai không gian sinh mã độc lập,
-    // nên chỉ xóa khi khớp cả mã lẫn email (nếu có) để không xóa nhầm tài khoản
-    // của người khác đang trùng mã.
-    const email = (employee.email || "").trim().toLowerCase();
-    const where = employee.id ? { id: employee.id, ...(email ? { email } : {}) } : null;
-    if (prisma && where) {
-      await prisma.user.deleteMany({ where }).catch(() => {});
-    }
-    const idx = memoryUsers.findIndex((u) => {
-      if (!employee.id || u.id !== employee.id) return false;
-      return email ? String(u.email || "").toLowerCase() === email : true;
-    });
-    if (idx >= 0) memoryUsers.splice(idx, 1);
-    return { ok: true, action: "delete" };
-  }
-
-  // action === "upsert"
-  const rawRole = (employee.systemRole || employee.role || "staff").toString().toLowerCase();
-  let role = "staff";
-  if (rawRole.includes("admin") || rawRole === "admin") role = "admin";
-  else if (rawRole.includes("quản lý") || rawRole.includes("manager") || rawRole === "manager") role = "manager";
-
-  let roleTitle = employee.role || "Nhân viên";
-  if (role === "admin") roleTitle = "Quản trị viên";
-  else if (role === "manager") roleTitle = "Quản lý Chi nhánh";
-
-  const email = (employee.email || "").trim().toLowerCase();
-  if (!email) return { ok: false, error: "Thiếu email" };
-
-  const name = (employee.name || "").trim() || "Nhân viên";
-  const branchSlug = employee.branchSlug ? employee.branchSlug.toUpperCase() : null;
-
+  const record = prisma ? await prisma.refreshToken.findUnique({ where: { token: refreshToken } }) : tokens.get(refreshToken);
+  if (!record || record.revoked || record.userId !== payload.userId || record.expiresAt <= new Date()) throw new UnauthorizedError("Refresh token không còn hiệu lực");
+  const device = record.deviceSessionId ? await getDevice(record.deviceSessionId) : null;
+  if (!device || device.userId !== payload.userId) throw new UnauthorizedError("Phiên thiết bị đã bị thu hồi");
+  const row = await findUser({ id: payload.userId });
+  if (!row) throw new UnauthorizedError("Tài khoản không còn tồn tại");
+  // Nền tảng khi refresh: header do Gateway set là chuẩn; nếu gọi nội bộ không
+  // qua Gateway thì lấy từ body, cuối cùng mới dùng nền tảng đã ký trong token.
+  const platform = clientPlatform({ clientPlatform: body.clientPlatform || payload.clientPlatform }, req);
+  if (platform !== payload.clientPlatform) throw new ForbiddenError("Không được chuyển nền tảng bằng refresh token");
+  requirePlatform(row, platform, req);
   if (prisma) {
-    const byId = employee.id
-      ? await prisma.user.findUnique({ where: { id: employee.id } })
-      : null;
-    const byEmail = await prisma.user.findUnique({ where: { email } });
-
-    // Không được "cướp" tài khoản: mã đã thuộc người khác thì báo xung đột để
-    // organization đổi mã nhân sự, thay vì đổi email/mật khẩu của tài khoản đó.
-    if (byId && String(byId.email).toLowerCase() !== email) {
-      return { ok: false, code: "ID_CONFLICT", identityId: byId.id, email: byId.email };
-    }
-    // Email đã có tài khoản với mã khác: organization nên dùng lại đúng mã đó.
-    if (byEmail && (!byId || byEmail.id !== byId.id)) {
-      return { ok: false, code: "EMAIL_EXISTS", identityId: byEmail.id, email: byEmail.email };
-    }
-
-    if (byId) {
-      const updated = await prisma.user.update({
-        where: { id: byId.id },
-        data: {
-          email,
-          name,
-          role,
-          roleTitle,
-          branchSlug,
-        },
-      });
-      return { ok: true, action: "updated", user: toSafeUser(updated) };
-    } else {
-      const created = await prisma.user.create({
-        data: {
-          id: employee.id || undefined,
-          email,
-          name,
-          role,
-          roleTitle,
-          branchSlug,
-          // Không đặt mật khẩu mặc định: ai biết email cũng đăng nhập được.
-          // Quản trị viên cấp mật khẩu tạm qua POST /api/auth/reset-password.
-          passwordHash: bcrypt.hashSync(crypto.randomBytes(24).toString("base64url"), 10),
-        },
-      });
-      return { ok: true, action: "created", user: toSafeUser(created) };
-    }
+    const consumed = await prisma.refreshToken.updateMany({ where: { id: record.id, revoked: false }, data: { revoked: true } });
+    if (consumed.count !== 1) throw new UnauthorizedError("Refresh token đã được sử dụng");
+    await prisma.deviceSession.update({ where: { id: device.id }, data: { lastSeenAt: new Date() } });
   } else {
-    const byId = employee.id ? memoryUsers.find((u) => u.id === employee.id) : null;
-    const byEmail = memoryUsers.find((u) => u.email === email);
-    if (byId && String(byId.email || "").toLowerCase() !== email) {
-      return { ok: false, code: "ID_CONFLICT", identityId: byId.id, email: byId.email };
-    }
-    if (byEmail && (!byId || byEmail.id !== byId.id)) {
-      return { ok: false, code: "EMAIL_EXISTS", identityId: byEmail.id, email: byEmail.email };
-    }
-    const existing = byId || byEmail;
-    if (existing) {
-      const idx = memoryUsers.indexOf(existing);
-      memoryUsers[idx] = {
-        ...memoryUsers[idx],
-        email,
-        name,
-        role,
-        roleTitle,
-        branchSlug,
-      };
-      return { ok: true, action: "updated", user: toSafeUser(memoryUsers[idx]) };
-    } else {
-      const newUser = {
-        id: employee.id || `u-${Date.now()}`,
-        email,
-        name,
-        role,
-        roleTitle,
-        branchSlug,
-        passwordHash: bcrypt.hashSync(crypto.randomBytes(24).toString("base64url"), 10),
-      };
-      memoryUsers.push(newUser);
-      return { ok: true, action: "created", user: toSafeUser(newUser) };
-    }
+    if (record.revoked) throw new UnauthorizedError("Refresh token đã được sử dụng");
+    record.revoked = true;
+    device.lastSeenAt = new Date();
   }
+  return issueTokens(row, platform, device.id);
 }
-
-module.exports = {
-  ALLOWED_ROLES,
-  toSafeUser,
-  ensureSeeded,
-  loginUseCase,
-  getMeUseCase,
-  changePasswordUseCase,
-  forgotPasswordUseCase,
-  resetPasswordByAdminUseCase,
-  refreshTokenUseCase,
-  getDevicesUseCase,
-  revokeDeviceUseCase,
-  syncEmployeeUseCase,
-};
+async function getDevicesUseCase(userId, currentSessionId) {
+  const prisma = database.getPrisma();
+  const rows = prisma ? await prisma.deviceSession.findMany({ where: { userId }, orderBy: { createdAt: "desc" } }) : [...devices.values()].filter(row => row.userId === userId);
+  return rows.map(row => ({ ...row, isCurrent: row.id === currentSessionId }));
+}
+async function revokeDeviceUseCase(userId, deviceId) {
+  const row = await getDevice(deviceId);
+  if (!row || row.userId !== userId) throw new NotFoundError("Không tìm thấy thiết bị của bạn");
+  await revokeSessions(userId, deviceId);
+  return { removed: true };
+}
+async function logoutUseCase(userId, { refreshToken, deviceSessionId } = {}) {
+  const prisma = database.getPrisma();
+  if (refreshToken) {
+    const record = prisma ? await prisma.refreshToken.findUnique({ where: { token: refreshToken } }) : tokens.get(refreshToken);
+    if (record?.userId === userId) deviceSessionId = record.deviceSessionId;
+  }
+  if (deviceSessionId) await revokeSessions(userId, deviceSessionId);
+  return { ok: true };
+}
+async function syncEmployeeUseCase({ employee, action = "upsert" }) {
+  if (!employee || !isUuid(employee.id)) throw new ValidationError("employee.id phải là UUID");
+  if (!["upsert", "resign", "delete"].includes(action)) throw new ValidationError("Thao tác đồng bộ không hợp lệ");
+  if (employee.branchId != null && !isUuid(employee.branchId)) throw new ValidationError("branchId phải là UUID");
+  const linked = await findUser({ employeeId: employee.id });
+  if (["delete", "resign"].includes(action) || employee.status === "nghỉ việc") {
+    if (linked) {
+      await revokeSessions(linked.id);
+      // Vô hiệu hóa mật khẩu nhưng giữ tài khoản và các ID lịch sử.
+      await saveUser(linked.id, { passwordHash: await bcrypt.hash(crypto.randomBytes(24).toString("base64url"), 10) });
+    }
+    return { ok: true, action: "disabled" };
+  }
+  const email = normalizeEmail(employee.email);
+  if (!email.includes("@") || !employee.name?.trim()) throw new ValidationError("Thiếu email hoặc tên nhân viên hợp lệ");
+  const byEmail = await findUser({ email });
+  if ((linked && byEmail && linked.id !== byEmail.id) || (byEmail?.employeeId && byEmail.employeeId !== employee.id)) throw new ValidationError("Email đã gắn với hồ sơ nhân viên khác");
+  const existing = linked || byEmail;
+  const data = { employeeId: employee.id, email, name: employee.name.trim(), branchId: employee.branchId || null };
+  let row;
+  if (existing) {
+    if (existing.branchId !== data.branchId) await revokeSessions(existing.id);
+    row = await saveUser(existing.id, data);
+  } else {
+    const create = { ...data, systemRole: "staff", passwordHash: await bcrypt.hash(crypto.randomBytes(24).toString("base64url"), 10) };
+    const prisma = database.getPrisma();
+    row = prisma ? await prisma.user.create({ data: create }) : { id: crypto.randomUUID(), ...create, createdAt: new Date() };
+    if (!prisma) users.set(row.id, row);
+  }
+  return { ok: true, action: existing ? "updated" : "created", user: toSafeUser(row) };
+}
+async function listUsersUseCase(actor) {
+  requireAdmin(actor);
+  const prisma = database.getPrisma();
+  const rows = prisma ? await prisma.user.findMany({ orderBy: { createdAt: "desc" } }) : [...users.values()];
+  return rows.map(toSafeUser);
+}
+async function getEmployeeRolesUseCase(employeeIds) {
+  if (!Array.isArray(employeeIds) || employeeIds.length > 500 || employeeIds.some(id => !isUuid(id))) throw new ValidationError("employeeIds phải là danh sách tối đa 500 UUID");
+  if (!employeeIds.length) return [];
+  const ids = [...new Set(employeeIds)];
+  const prisma = database.getPrisma();
+  return prisma ? prisma.user.findMany({ where: { employeeId: { in: ids } }, select: { employeeId: true, systemRole: true } })
+    : [...users.values()].filter(row => ids.includes(row.employeeId)).map(row => ({ employeeId: row.employeeId, systemRole: row.systemRole }));
+}
+async function updateUserUseCase(id, body, actor) {
+  requireAdmin(actor);
+  if (!isUuid(id) || !ALLOWED_ROLES.includes(body.systemRole)) throw new ValidationError("ID hoặc vai trò không hợp lệ");
+  if (!(await findUser({ id }))) throw new NotFoundError("Không tìm thấy tài khoản");
+  const row = await saveUser(id, { systemRole: body.systemRole });
+  await revokeSessions(id);
+  return toSafeUser(row);
+}
+module.exports = { getEmployeeRolesUseCase, ALLOWED_ROLES, toSafeUser, clientPlatform, loginUseCase, getMeUseCase, changePasswordUseCase, forgotPasswordUseCase, resetPasswordByAdminUseCase, refreshTokenUseCase, getDevicesUseCase, revokeDeviceUseCase, logoutUseCase, syncEmployeeUseCase, listUsersUseCase, updateUserUseCase };

@@ -9,4 +9,7 @@ module.exports = {
   databaseUrl: process.env.DATABASE_URL || "",
   corsOrigin: (process.env.CORS_ORIGIN || "http://localhost:3000").split(","),
   integrationServiceUrl: process.env.INTEGRATION_SERVICE_URL || "http://localhost:4005",
+  organizationServiceUrl: process.env.ORGANIZATION_SERVICE_URL || "http://localhost:4002",
+  identityServiceUrl: process.env.IDENTITY_SERVICE_URL || "http://localhost:4001",
+  internalToken: process.env.INTERNAL_API_TOKEN || "",
 };

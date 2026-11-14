@@ -14,6 +14,7 @@ try {
     prisma = new PrismaClient();
   }
 } catch (e) {
+  if (config.databaseUrl) throw e;
   useMemory = true;
 }
 
@@ -27,10 +28,7 @@ async function connect() {
     console.log("[work-service] Đã kết nối Postgres");
     return { mode: "postgres" };
   } catch (error) {
-    console.warn("[work-service] Không kết nối được Postgres, fallback memory:", error.message);
-    useMemory = true;
-    prisma = null;
-    return { mode: "memory" };
+    throw new Error(`Không kết nối được Postgres work-service: ${error.message}`, { cause: error });
   }
 }
 

@@ -14,6 +14,7 @@ try {
     prisma = new PrismaClient();
   }
 } catch (e) {
+  if (config.databaseUrl) throw e;
   useMemory = true;
 }
 
@@ -22,16 +23,8 @@ async function connect() {
     console.log("[integration-service] DATABASE_URL trống hoặc thiếu client -> dùng kho in-memory");
     return { mode: "memory" };
   }
-  try {
-    await prisma.$connect();
-    console.log("[integration-service] Đã kết nối Postgres Supabase (hrm_integration)");
-    return { mode: "postgres" };
-  } catch (error) {
-    console.warn("[integration-service] Không kết nối được Postgres, fallback memory:", error.message);
-    useMemory = true;
-    prisma = null;
-    return { mode: "memory" };
-  }
+  await prisma.$connect();
+  return { mode: "postgres" };
 }
 
 async function disconnect() {
