@@ -124,3 +124,28 @@ test("SOAP cần phiếu đã xác nhận, giữ số tiền dạng chuỗi và 
   assert.ok(soap.parsePayoutRequest(`<!DOCTYPE test>${xml}`).error);
   assert.match(soap.buildWsdl("http://example/soap/payroll"),/payslipId/);
 });
+
+test("attendance reminder settings still control automatic reminder creation", async () => {
+  const previous = clients.shifts;
+  const shiftId = randomUUID();
+  clients.shifts = async () => [{id:shiftId,employeeId:employeeA.id,workDate:"2099-01-01",scheduledStart:"12:00",scheduledEnd:"17:00",status:"đang làm",attendance:null}];
+  try {
+    const now = new Date("2099-01-01T11:00:00+07:00");
+    await s.notificationSettings(staff,{checkInBefore1Hour:false});
+    assert.equal((await s.reminders(staff,now)).length,0);
+    await s.notificationSettings(staff,{checkInBefore1Hour:true});
+    assert.equal((await s.reminders(staff,now)).length,1);
+    assert.equal((await s.reminders(staff,now)).length,0,"Không tạo nhắc trùng");
+  } finally {clients.shifts=previous;}
+});
+
+test("request deletion is pending-only and uses an atomic status condition", async () => {
+  const previous=db.getPrisma;
+  const id=randomUUID();
+  let where;
+  db.getPrisma=()=>({request:{findUnique:async()=>({id,status:"pending",branchId:branchA,employeeId:employeeA.id}),deleteMany:async(args)=>{where=args.where;return{count:0};}}});
+  try {
+    await assert.rejects(s.deleteRequest(id,manager),{status:409});
+    assert.deepEqual(where,{id,status:"pending"});
+  } finally {db.getPrisma=previous;}
+});

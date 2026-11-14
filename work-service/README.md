@@ -28,9 +28,8 @@ Thành công `{data,message}`, lỗi `{error:{code,message}}`; UUID cho ID, ngà
 | `POST /api/shifts/:id/assign` | `employeeId`, chỉ ca chưa bắt đầu/chưa chấm công. |
 | `GET /api/shifts/registrations`, `POST /api/shifts/register`, `DELETE /api/shifts/registrations/:id` | `employeeId?,templateId,registerDate`; staff buộc employee của phiên. |
 | `GET/PUT /api/attendance/config` | User admin hoặc đọc bằng internal token; chỉ các thuộc tính Prisma hiện tại. |
-| `POST /api/attendance/preflight` | `{employeeId?,wifi:{bssid,ssid?}}`; Wi-Fi sai thì không trả danh sách. Trả ca ngày hiện tại và ca qua đêm còn mở, cùng cấu hình thời gian cần thiết. |
 | `POST /api/attendance/checkin`, `/api/attendance/checkout` | `{shiftId,employeeId?,wifi:{bssid,ssid?}}`; dùng giờ server, không nhận giờ do nhân viên chọn. |
-| `POST /api/attendance/double` | `{shiftId,nextShiftId,wifi:{bssid,ssid?}}`; một transaction ghi checkout trước/check-in sau ở mốc nối. |
+| `POST /api/attendance/double` | `{shiftId,nextShiftId,employeeId?,wifi:{bssid,ssid?}}`; một transaction ghi checkout trước/check-in sau ở mốc nối. |
 | `PUT /api/attendance/:shiftId` | Admin/manager chọn `{checkIn,checkOut,penaltyNote?}` trên ca hiện có. Không cần endpoint chấm công hộ hoặc duyệt đơn để tự điền giờ. |
 | `GET /api/attendance` | Query `employeeId,branchId,month,workDate`; đọc nội bộ cho Payroll. |
 | `GET/POST /api/tasks`, `PUT/DELETE /api/tasks/:id` | Riêng: `assignedTo`; chung: `branchId,workDate,templateId`. Staff chỉ sửa `status,proofPhotoUrl` của task mình được phép xem. |

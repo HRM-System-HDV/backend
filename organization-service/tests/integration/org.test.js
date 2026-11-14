@@ -28,7 +28,11 @@ test("catalog UUID relations and direct employee lifecycle over HTTP",async()=> 
   const listed=await request(app).get(`/api/employees?branchId=${branch.body.data.id}`).set("x-internal-token",config.internalToken);
   assert.equal(listed.body.data.length,1);
   const deleted=await request(app).delete(`/api/employees/${id}`).set(admin);
-  assert.equal(deleted.status,200); assert.equal(deleted.body.data.status,"nghỉ việc");
+  assert.equal(deleted.status,404);
+  const preserved = await request(app).get(`/api/employees/${id}`).set(admin);
+  assert.equal(preserved.status,200); assert.equal(preserved.body.data.status,"đang làm");
+  const resigned = await request(app).post(`/api/employees/${id}/leave`).set(admin).send({});
+  assert.equal(resigned.status,200); assert.equal(resigned.body.data.status,"nghỉ việc");
   assert.equal((await request(app).get(`/api/employees/${id}`).set(admin)).status,200);
 });
 test("staff only accesses own profile; role injection and legacy payload rejected",async()=> {

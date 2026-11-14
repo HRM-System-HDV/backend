@@ -147,7 +147,6 @@ async function confirmPayslip(id, actor) {
   if (db) { const updated = await db.payslip.updateMany({ where: { id, status: "pending_confirmation", payoutId: null }, data: patch }); if (updated.count !== 1) throw new DuplicateError("Phiếu vừa được xử lý, hãy tải lại"); return db.payslip.findUnique({ where: { id } }); }
   return exclusive(() => { const row = required(memory.payslips.find(p => p.id === id), "Không tìm thấy phiếu"); if (row.status !== "pending_confirmation") throw new DuplicateError("Phiếu vừa được xử lý"); Object.assign(row, patch); return clone(row); });
 }
-async function setPayslipStatus(id, status, actor) { if (status !== "confirmed") throw new ValidationError("Chỉ được xác nhận phiếu; trạng thái paid do lệnh chi thành công cập nhật"); return confirmPayslip(id, actor); }
 const payoutInclude = { payslips: { select: { id: true } } };
 async function findByIdempotencyKey(key) { const db = database.getPrisma(); return db ? db.payout.findUnique({ where: { idempotencyKey: key }, include: payoutInclude }) : clone(memory.payouts.find(p => p.idempotencyKey === key)); }
 function payoutInput(payload) {
@@ -204,4 +203,4 @@ async function createPayoutUseCase(payload, actor) {
   }
 }
 async function listPayouts(actor) { requireAdmin(actor); const db = database.getPrisma(); return db ? db.payout.findMany({ orderBy: { createdAt: "desc" }, include: payoutInclude }) : memory.payouts.map(clone); }
-module.exports = { listBankAccounts, createBankAccount, updateBankAccount, deleteBankAccount, calculateSalary, getPayslip, listPayslips, generatePayslipUseCase, updatePayslip, confirmPayslip, setPayslipStatus, createPayoutUseCase, listPayouts, findByIdempotencyKey };
+module.exports = { listBankAccounts, createBankAccount, updateBankAccount, deleteBankAccount, calculateSalary, getPayslip, listPayslips, generatePayslipUseCase, updatePayslip, confirmPayslip, createPayoutUseCase, listPayouts, findByIdempotencyKey };

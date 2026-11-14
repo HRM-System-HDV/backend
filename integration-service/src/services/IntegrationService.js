@@ -112,6 +112,22 @@ async function validateSwap(data) {
     if (shiftDay(other)===shiftDay(source) && other.templateId===source.templateId || start<sourceTime[1] && sourceTime[0]<end) throw error("Nhân viên đích đã có ca này hoặc ca chồng giờ",409,"DUPLICATE_RESOURCE");
   }
 }
+// Danh sách tối thiểu để chọn người nhận ca, không mở quyền đọc hồ sơ/lịch sử công.
+async function shiftOptions(query, who) {
+  const source = await clients.shift(uuid(query.sourceShiftId, "sourceShiftId"));
+  const owner = await clients.employee(source.employeeId);
+  uuid(owner.branchId, "branchId");
+  branch(who, owner.branchId, true);
+  if (who.role === "staff" && source.employeeId !== who.employeeId) throw error("Ca không thuộc nhân viên", 403, "FORBIDDEN");
+  if (source.status === "đã hủy" || shiftTimes(source)[0] <= Date.now() || await resolveCheckedIn(source, "ca nguồn")) throw error("Chỉ đề nghị đổi ca chưa tới giờ và chưa chấm công");
+  const employees = (await clients.employees({branchId: owner.branchId}))
+    .filter(row => row.branchId === owner.branchId && row.status !== "nghỉ việc" && row.id !== source.employeeId);
+  const ids = new Set(employees.map(row => row.id));
+  const shifts = (await clients.shifts({branchId: owner.branchId}))
+    .filter(row => ids.has(row.employeeId) && row.status !== "đã hủy" && shiftTimes(row)[0] > Date.now() && checkedInState(row) === false)
+    .map(({id, employeeId, workDate, templateId, scheduledStart, scheduledEnd, status}) => ({id, employeeId, workDate, templateId, scheduledStart, scheduledEnd, status}));
+  return {employees: employees.map(({id, name}) => ({id, name})), shifts};
+}
 async function listRequests(query,who) {
   // Quản lý không có chi nhánh thì không được xem đơn nào (trước đây mọi dòng đều bị loại).
   if (who.role === "manager" && !who.branchId) return [];
@@ -158,7 +174,21 @@ async function reviewRequest(id,approved,body,who,peer=false) {
   await sendNotification({targetEmployeeId:row.employeeId,branchId:row.branchId,title:"Kết quả đơn đề nghị",body:`${row.title}: ${approved?"Đã chấp thuận":"Đã từ chối"}`,requestId:id,requestType:row.type},who,true).catch(e=>console.warn("Không gửi được kết quả đơn:",e.message));
   return updated;
 }
-async function deleteRequest(id,who) { const row=await get("request",id); requestRead(row,who); manager(who); branch(who,row.branchId,true); if(row.status!=="pending") throw error("Chỉ xóa đơn đang chờ"); return remove("request",id); }
+async function deleteRequest(id,who) {
+  const row=await get("request",id); requestRead(row,who); manager(who); branch(who,row.branchId,true);
+  if(row.status!=="pending") throw error("Chỉ xóa đơn đang chờ");
+  const db=database.getPrisma();
+  if(db) {
+    const result=await db.request.deleteMany({where:{id,status:"pending"}});
+    if(result.count!==1) throw error("Đơn đã được xử lý hoặc đã xóa. Vui lòng tải lại.",409,"CONFLICT");
+  } else {
+    const index=memory.request.findIndex(item=>item.id===id && item.status==="pending");
+    if(index<0) throw error("Đơn đã được xử lý hoặc đã xóa. Vui lòng tải lại.",409,"CONFLICT");
+    memory.request.splice(index,1);
+    for(const notification of memory.notification) if(notification.requestId===id) notification.requestId=null;
+  }
+  return {deleted:true};
+}
 // Mức cô lập Serializable cho ghi fanout (Prisma enum = chuỗi "Serializable").
 function serializableIsolation() { try { return require("@prisma/client").Prisma.TransactionIsolationLevel.Serializable; } catch { return "Serializable"; } }
 // Ghi fanout thông báo: mỗi người nhận một dòng (BUSINESS.md §9.2) nhưng phải ghi
@@ -268,7 +298,7 @@ async function soapConfig(who,body) {
   const data=pick(body,["endpointUrl","wsdlUrl","serviceName","securityMode","certExpiry"]);
   const merged={...row,...data}; for(const key of ["endpointUrl","wsdlUrl"]) { try {const url=new URL(merged[key]);if(!["http:","https:"].includes(url.protocol)) throw new Error();} catch {throw error(`${key} không hợp lệ`);} }
   text(merged.serviceName,"serviceName");text(merged.securityMode,"securityMode");
-  return row?save("soapGatewayConfig",row.id,data):add("soapGatewayConfig",{isSingleton:true,status:"unknown",...data});
+  return row?save("soapGatewayConfig",row.id,{...data,status:"unknown",lastPingTime:null,avgResponseTime:null}):add("soapGatewayConfig",{isSingleton:true,status:"unknown",...data});
 }
-async function ping(who) { const row=await soapConfig(who); if(!row) throw error("Chưa cấu hình SOAP"); const start=Date.now(); const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),5000); let status="down"; try{const response=await fetch(row.wsdlUrl,{signal:controller.signal});status=response.ok?"healthy":"degraded";await response.body?.cancel();}catch{}finally{clearTimeout(timer);} return save("soapGatewayConfig",row.id,{status,lastPingTime:new Date().toISOString(),avgResponseTime:`${Date.now()-start}ms`}); }
-module.exports={listRequests,createRequest,reviewRequest,deleteRequest,getRequest:async(id,who)=>{const row=await get("request",id);requestRead(row,who);return row;},sendNotification,listNotifications,readNotification,readAllNotifications,notificationSettings,reminders,contentList,contentWrite,contentGet,contentDelete,backlog,listBacklog,soapConfig,ping};
+async function ping(who) { const row=await soapConfig(who); if(!row) throw error("Chưa cấu hình SOAP"); const start=Date.now(); const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),4000); let status="down"; try{const response=await fetch(row.wsdlUrl,{signal:controller.signal});status=response.ok?"healthy":"degraded";await response.body?.cancel();}catch{}finally{clearTimeout(timer);} return save("soapGatewayConfig",row.id,{status,lastPingTime:new Date().toISOString(),avgResponseTime:`${Date.now()-start}ms`}); }
+module.exports={shiftOptions,listRequests,createRequest,reviewRequest,deleteRequest,getRequest:async(id,who)=>{const row=await get("request",id);requestRead(row,who);return row;},sendNotification,listNotifications,readNotification,readAllNotifications,notificationSettings,reminders,contentList,contentWrite,contentGet,contentDelete,backlog,listBacklog,soapConfig,ping};

@@ -52,13 +52,13 @@ test("concurrent duplicate assignment rejected; overlap rejected; adjacent ca pe
   const adjacent = await service.createTemplate({ templateCode: randomUUID(), name: "Liền ca", startTime: "12:00", endTime: "17:00" }, admin);
   assert.ok((await service.createShift({ employeeId: f.e.id, branchId: f.e.branchId, templateId: adjacent.id, workDate: "2026-11-12" }, admin)).id);
 });
-test("Wi-Fi preflight fails before returning today shifts; employee id differs from user id", async (t) => {
+test("check-in checks Wi-Fi and employee identity before recording attendance", async (t) => {
   const f = await fixture(t); f.setTime("2026-11-12T07:00:00+07:00");
-  await assert.rejects(service.preflight({ wifi: { bssid: "other" } }, f.actor), { status: 403 });
-  const opened = await service.preflight({ wifi }, f.actor);
-  assert.equal(opened.shifts.length, 1); assert.equal(opened.shifts[0].id, f.shift.id);
-  await assert.rejects(service.preflight({ employeeId: randomUUID(), wifi }, f.actor), { status: 403 });
+  await assert.rejects(service.checkin({ shiftId: f.shift.id, wifi: { bssid: "other" } }, f.actor), { status: 403 });
+  await assert.rejects(service.checkin({ shiftId: f.shift.id, employeeId: randomUUID(), wifi }, f.actor), { status: 403 });
+  assert.ok((await service.checkin({ shiftId: f.shift.id, wifi }, f.actor)).checkIn);
 });
+
 test("check-in too early rejected; late allowed and early checkout penalties sum against real hourly ca", async (t) => {
   const f = await fixture(t);
   f.setTime("2026-11-12T06:44:00+07:00");
@@ -121,11 +121,11 @@ test("double attendance Postgres transaction rolls back previous checkout if nex
   await assert.rejects(service.doubleAttendance({ shiftId: previousId, nextShiftId: nextId, wifi }, staff(e)), /insert failed/);
   assert.equal(store.attendance[0].checkOut, null); assert.equal(store.attendance.length, 1); assert.equal(transactionOptions.isolationLevel, "Serializable");
 });
-test("overnight ca remains in preflight after midnight and can checkout", async (t) => {
+test("overnight ca can checkout after midnight", async (t) => {
   const f = await fixture(t, { start: "22:00", end: "06:00" });
   f.setTime("2026-11-12T22:00:00+07:00"); await service.checkin({ shiftId: f.shift.id, wifi }, f.actor);
   f.setTime("2026-11-13T01:00:00+07:00");
-  assert.ok((await service.preflight({ wifi }, f.actor)).shifts.some((r) => r.id === f.shift.id));
+  assert.ok((await service.listShifts({employeeId: f.e.id}, f.actor)).some((r) => r.id === f.shift.id));
   f.setTime("2026-11-13T06:00:00+07:00"); await service.checkout({ shiftId: f.shift.id, wifi }, f.actor);
   const attendance = (await service.listAttendance({ employeeId: f.e.id }, f.actor))[0];
   assert.equal(attendance.workedSeconds, 8 * 3600); assert.equal(attendance.penaltyAmount, "0");

@@ -325,19 +325,6 @@ async function wifi(employee, payload) {
   const configs = await IntegrationClient.getWifiConfigs(employee.branchId);
   if (!configs.some((r) => r.branchId === employee.branchId && r.status === "hoạt động" && String(r.bssid).toLowerCase() === bssid && (!ssid || r.ssid === ssid))) throw new ForbiddenError("Wi-Fi không thuộc chi nhánh được phép chấm công");
 }
-async function preflight(payload, caller) {
-  fields(payload, ["employeeId", "wifi"]);
-  const employeeId = selfEmployee(payload.employeeId, caller); const employee = await employeeScope(employeeId, caller, { requireActive: true });
-  await wifi(employee, payload);
-  const cfg = await configValue(null, employee.branchId);
-  const now = Date.now();
-  const available = (await listShifts({ employeeId }, caller)).filter((r) => {
-    const { start, end } = time.bounds(r);
-    return time.day(r.workDate) === time.today() || (!r.attendance?.checkOut && start.getTime() <= now && end.getTime() + cfg.checkoutWindowMinutes * 60000 > now);
-  });
-  return { workDate: time.today(), shifts: available,
-    config: Object.fromEntries(["earlyCheckinMinutes", "checkoutWindowMinutes", "allowDoubleCheckin", "doubleCheckinEarlyMinutes", "doubleCheckinLateMinutes"].map((key) => [key, cfg[key]])) };
-}
 function attendanceEvaluation(row, shift, employee, cfg) {
   if (!row.checkIn || !row.checkOut) return { ...row, penaltyAmount: "0", earnedSalary: "0", workedSeconds: 0, complete: false, shift };
   const seconds = Math.max(0, (new Date(row.checkOut) - new Date(row.checkIn)) / 1000);
@@ -527,5 +514,5 @@ async function deleteTask(key, caller) {
 }
 module.exports = { getConfig, updateConfig, listTemplates, createTemplate, updateTemplate, deleteTemplate,
   listShifts, createShift, updateShift, swapShiftEmployees, deleteShift, getShiftById, registerShift, listRegistrations, deleteRegistration,
-  preflight, checkin, checkout, doubleAttendance, saveAttendance, listAttendance,
+  checkin, checkout, doubleAttendance, saveAttendance, listAttendance,
   listTasks, createTask, updateTask, deleteTask, getTaskById };

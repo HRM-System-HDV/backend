@@ -63,3 +63,39 @@ test("news allows urgent announcements without pinning and restricts company mut
   await request(app).delete(`/api/news/${company.id}`).set(manager).expect(403);
   await request(app).put(`/api/news/${company.id}`).set(headers).send({ pinned: true }).expect(200);
 });
+
+test("manual notification POST routes are removed while settings remain available", async () => {
+  for (const path of ["/api/notifications", "/api/notifications/reminders"]) await request(app).post(path).set(headers).send({}).expect(404);
+  await request(app).get("/api/notifications/settings").set(headers).expect(200);
+});
+
+test("admin saves SOAP config, pings WSDL, and config changes clear old ping status", async (t) => {
+  const payload = {endpointUrl:"https://bank.example/soap",wsdlUrl:"https://bank.example/soap?wsdl",serviceName:"Payroll",securityMode:"TLS",certExpiry:null};
+  await request(app).put("/api/soap-config").set(headers).send(payload).expect(200);
+  const calls = [];
+  t.mock.method(global, "fetch", async url => {calls.push(url);return {ok:true,body:{cancel:async()=>{}}};});
+  const ping = (await request(app).post("/api/soap-config/ping").set(headers).send({}).expect(200)).body.data;
+  assert.equal(ping.status,"healthy");assert.ok(ping.lastPingTime);assert.match(ping.avgResponseTime,/ms$/);assert.deepEqual(calls,[payload.wsdlUrl]);
+  const changed = (await request(app).put("/api/soap-config").set(headers).send({...payload,endpointUrl:"https://other.example/soap"}).expect(200)).body.data;
+  assert.equal(changed.status,"unknown");assert.equal(changed.lastPingTime,null);
+  await request(app).put("/api/soap-config").set({...headers,"x-user-role":"manager"}).send(payload).expect(403);
+});
+
+test("only managers in scope may delete pending requests; processed requests are retained", async (t) => {
+  const clients = require("../../src/clients/ServiceClient");
+  const employeeId = randomUUID();
+  t.mock.method(clients, "employee", async () => ({id:employeeId,branchId,status:"đang làm"}));
+  const payload = {type:"advance",employeeId,title:"Request to delete",content:"Reason",advanceAmount:"1000"};
+  const created = (await request(app).post("/api/requests").set(headers).send(payload).expect(201)).body.data;
+  const path = `/api/requests/${created.id}`;
+  const manager = {...headers,"x-user-role":"manager","x-branch-id":branchId};
+  await request(app).delete(path).set({...manager,"x-branch-id":randomUUID()}).expect(403);
+  await request(app).delete(path).set({...manager,"x-user-role":"staff","x-employee-id":employeeId}).expect(403);
+  await request(app).delete(path).set(manager).expect(200);
+  await request(app).get(path).set(headers).expect(404);
+  const processed = (await request(app).post("/api/requests").set(headers).send(payload).expect(201)).body.data;
+  await request(app).put(`/api/requests/${processed.id}/approve`).set(headers).send({}).expect(200);
+  await request(app).delete(`/api/requests/${processed.id}`).set(headers).expect(400);
+  const retained = (await request(app).get(`/api/requests/${processed.id}`).set(headers).expect(200)).body.data;
+  assert.equal(retained.status,"approved");
+});

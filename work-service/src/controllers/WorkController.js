@@ -22,7 +22,6 @@ module.exports = {
   deleteRegistration: execute((req, caller) => WorkService.deleteRegistration(req.params.id, caller)),
   getConfig: execute((req, caller) => WorkService.getConfig(caller, req.query.branchId)),
   updateConfig: execute((req, caller) => WorkService.updateConfig(req.body, caller, req.query.branchId)),
-  preflight: execute((req, caller) => WorkService.preflight(req.body, caller)),
   checkin: execute((req, caller) => WorkService.checkin(req.body, caller), 201),
   checkout: execute((req, caller) => WorkService.checkout(req.body, caller)),
   doubleAttendance: execute((req, caller) => WorkService.doubleAttendance(req.body, caller)),

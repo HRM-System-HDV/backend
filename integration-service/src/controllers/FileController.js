@@ -58,24 +58,4 @@ async function deleteFile(req, res, next) {
   }
 }
 
-async function scanOrphans(req, res, next) {
-  try {
-    admin(req.actor);
-    const result = await FileService.scanOrphans(req.body?.graceHours ?? 24);
-    return res.status(200).json({ data: result, message: "Quét ảnh mồ côi thành công" });
-  } catch (err) {
-    next(err);
-  }
-}
-
-async function purgeOrphans(req, res, next) {
-  try {
-    admin(req.actor);
-    const result = await FileService.purgeOrphans(req.body?.publicIds);
-    return res.status(200).json({ data: result, message: "Đã dọn ảnh mồ côi" });
-  } catch (err) {
-    next(err);
-  }
-}
-
-module.exports = { getFile, deleteFile, scanOrphans, purgeOrphans };
+module.exports = { getFile, deleteFile };

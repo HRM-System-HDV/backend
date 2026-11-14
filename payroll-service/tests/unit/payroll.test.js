@@ -98,7 +98,7 @@ test("đọc phiếu chỉ ĐỌC (không ghi DB, không gọi lại Org/Work); 
   employee.salary = "99999";
   assert.equal((await service.getPayslip(slip.id, staff)).baseSalary, "200000");
   await assert.rejects(service.updatePayslip(slip.id, { bonus: "1" }, admin), /đã xác nhận/);
-  await assert.rejects(service.setPayslipStatus(slip.id, "paid", admin), /do lệnh chi/);
+  assert.equal((await service.getPayslip(slip.id, admin)).status, "confirmed", "Xác nhận không tự chuyển phiếu sang paid");
 });
 test("phiếu thực lĩnh 0 được chi để đóng trạng thái (không trừ tiền); thực lĩnh âm bị từ chối", async () => {
   // Phiếu 0đ: nhân viên không có ca nào hợp lệ trong kỳ.
@@ -150,7 +150,7 @@ test("insufficient funds, wrong totals and non-admin cannot mutate payment", asy
   assert.equal((await service.listBankAccounts(admin)).find(a => a.id === account.id).balance, "1");
   await assert.rejects(service.createPayoutUseCase(input, { role: "manager", userId: randomUUID() }), /quản trị/);
 });
-test("Q-D-05: id rác trên cả ba đường ghi phiếu là 400, không lọt xuống Prisma", async () => {
+test("Q-D-05: id rác trên các đường ghi phiếu là 400, không lọt xuống Prisma", async () => {
   // Trước đây id không phải UUID đi thẳng tới Prisma -> ném P2023 -> 500 kèm
   // thông điệp thô có đường dẫn tuyệt đối của máy chủ (lộ cấu trúc repo).
   // Message giả lập bên dưới cố tình chứa đủ dấu vết đó để test PHỦ ĐỊNH bắt được.
@@ -162,7 +162,6 @@ test("Q-D-05: id rác trên cả ba đường ghi phiếu là 400, không lọt 
   const writeCalls = [
     ["updatePayslip", (id) => service.updatePayslip(id, { bonus: "1" }, admin)],
     ["confirmPayslip", (id) => service.confirmPayslip(id, admin)],
-    ["setPayslipStatus", (id) => service.setPayslipStatus(id, "confirmed", admin)],
   ];
   db.getPrisma = () => {
     prismaCalls++;
@@ -196,7 +195,7 @@ test("Q-D-05: id rác trên cả ba đường ghi phiếu là 400, không lọt 
       return true;
     });
   }
-  assert.deepEqual(lookedUp, [goodId, goodId, goodId]);
+  assert.deepEqual(lookedUp, writeCalls.map(() => goodId));
 });
 test("configured Prisma query errors never fall back to memory", async () => {
   db.getPrisma = () => ({ bankAccount: { findMany: async () => { throw new Error("DB read failed"); } } });
